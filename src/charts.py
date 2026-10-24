@@ -530,66 +530,92 @@ def create_demographic_matrix_heatmap(df, filters):
     return fig
 
 
-def create_thailand_map(reg_data, metric='avg_wage', year=2568):
-    """
-    Render Thailand Regional Choropleth Map using offline GeoJSON in assets/thailand_regions.geojson.
-    """
-    geojson_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets', 'thailand_regions.geojson')
-    if not os.path.exists(geojson_path):
-        geojson_path = os.path.join('assets', 'thailand_regions.geojson')
+def create_thailand_map(reg_data, metric='avg_wage', year=2568, selected_region='ทั้งหมด'):
+    """Regional polygons from the project's province GeoJSON; one shape per region.
 
-    if not os.path.exists(geojson_path) or reg_data.empty:
-        # Fallback to horizontal bar ranking
+    This uses true region-level features and stable feature ordering for click events.
+    """
+    from shapely.geometry import shape, mapping
+    from shapely.ops import unary_union
+
+    geojson_path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), 'assets', 'thailand_regions.geojson'
+    )
+    if not os.path.isfile(geojson_path):
         return create_regional_ranking_chart(reg_data, metric=metric)
 
-    with open(geojson_path, 'r', encoding='utf-8') as f:
-        geo = json.load(f)
+    with open(geojson_path, encoding='utf-8') as file:
+        source = json.load(file)
 
-    reg_key = 'region_7' if year >= 2568 else 'region_5'
+    region_property = 'region_7' if int(year) >= 2568 else 'region_5'
+    groups = {}
+    for feature in source.get('features', []):
+        name = feature.get('properties', {}).get(region_property)
+        geom = feature.get('geometry')
+        if name and geom:
+            groups.setdefault(name, []).append(shape(geom))
 
-    # Prepare values mapped to provinces
-    features_rows = []
-    reg_val_map = dict(zip(reg_data['region'], reg_data[metric]))
+    if not groups or reg_data.empty or metric not in reg_data.columns:
+        return create_regional_ranking_chart(reg_data, metric=metric)
 
-    for f in geo['features']:
-        p_name = f['properties']['name']
-        p_reg = f['properties'].get(reg_key, '')
-        val = reg_val_map.get(p_reg, None)
-        features_rows.append({
-            'province': p_name,
-            'region': p_reg,
-            'val': val
-        })
+    merged_shapes = {name: unary_union(items) for name, items in groups.items()}
+    geojson = {
+        'type': 'FeatureCollection',
+        'features': [
+            {'type': 'Feature', 'properties': {'region': name},
+             'geometry': mapping(geometry)}
+            for name, geometry in merged_shapes.items()
+        ]
+    }
+    frame = reg_data[['region', metric]].copy()
+    frame[metric] = pd.to_numeric(frame[metric], errors='coerce')
+    frame = frame.dropna(subset=[metric])
+    frame = frame[frame['region'].isin(merged_shapes)].drop_duplicates('region')
+    if frame.empty:
+        return go.Figure()
 
-    map_df = pd.DataFrame(features_rows)
-
-    metric_title = 'ค่าจ้างเฉลี่ย (บาท)' if metric == 'avg_wage' else ('อัตราว่างงาน (%)' if metric == 'unemp_rate' else 'อัตรามีงานทำ (%)')
-    colorscale = [[0, '#FFF2F9'], [0.4, COLOR_PINK], [1, COLOR_PURPLE]]
-
-    fig = px.choropleth(
-        map_df,
-        geojson=geo,
-        locations='province',
-        featureidkey='properties.name',
-        color='val',
-        color_continuous_scale=colorscale,
-        hover_name='province',
-        hover_data={'region': True, 'val': ':.2f', 'province': False},
-        labels={'val': metric_title, 'region': 'ภูมิภาค'}
-    )
-
+    titles = {
+        'avg_wage': 'ค่าจ้างเฉลี่ย (บาท/เดือน)',
+        'unemp_rate': 'อัตราการว่างงาน (%)',
+        'emp_rate': 'อัตราการมีงานทำ (%)',
+    }
+    metric_title = titles.get(metric, metric)
+    # Order and trace locations are aligned. Click handler can use pointNumber or location.
+    fig = go.Figure(go.Choropleth(
+        geojson=geojson,
+        locations=frame['region'].tolist(),
+        z=frame[metric].tolist(),
+        featureidkey='properties.region',
+        customdata=[[str(region)] for region in frame['region']],
+        colorscale=[[0, '#FDE6F1'], [.45, '#EB5DA7'], [1, '#683074']],
+        colorbar=dict(title=metric_title, thickness=13, len=.65,
+                      x=1.01, xpad=4, tickfont=dict(size=11)),
+        marker_line_color='#FFFFFF', marker_line_width=1.8,
+        hovertemplate='<b>%{location}</b><br>' + metric_title + ': %{z:,.2f}<extra></extra>',
+        showscale=True,
+    ))
+    # Projections/extent in degrees. Explicit geographic extents avoid postage-stamp maps.
+    if selected_region in merged_shapes:
+        minx, miny, maxx, maxy = merged_shapes[selected_region].bounds
+        padding = 0.12
+    else:
+        joined = unary_union(list(merged_shapes.values()))
+        minx, miny, maxx, maxy = joined.bounds
+        padding = 0.045
+    dx, dy = max(0.8, maxx-minx), max(0.8, maxy-miny)
     fig.update_geos(
-        fitbounds="locations",
-        visible=False
+        projection_type='mercator',
+        lonaxis_range=[minx-dx*padding, maxx+dx*padding],
+        lataxis_range=[miny-dy*padding, maxy+dy*padding],
+        bgcolor='rgba(0,0,0,0)', visible=False,
+        showcoastlines=False, showland=False,
+        domain=dict(x=[0, .91], y=[0, 1]),
     )
-
-    fig = apply_chart_theme(fig, height=450, margin=dict(l=0, r=0, t=30, b=0))
     fig.update_layout(
-        coloraxis_colorbar=dict(
-            title=metric_title,
-            thickness=14,
-            len=0.7,
-            tickfont=dict(family=FONT_FAMILY, size=10)
-        )
+        height=650, margin=dict(l=0, r=0, t=0, b=0),
+        paper_bgcolor='rgba(0,0,0,0)',
+        font=dict(family=FONT_FAMILY, color=COLOR_DARK_PURPLE),
+        clickmode='event+select', dragmode=False,
+        uirevision=f'map_{year}_{selected_region}_{metric}',
     )
     return fig

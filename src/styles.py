@@ -9,6 +9,12 @@ def get_custom_css():
     @import url('https://fonts.googleapis.com/css2?family=Kanit:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&display=swap');
 
     /* Global Typography */
+    .block-container {
+        max-width: 1600px !important;
+        padding-top: 1rem !important;
+        padding-bottom: 2rem !important;
+    }
+
     html, body, [class*="css"], .stMarkdown, .stText, .stButton, .stSelectbox, .stRadio {
         font-family: 'Kanit', sans-serif !important;
     }
@@ -26,20 +32,32 @@ def get_custom_css():
     
     /* Sidebar Styling */
     section[data-testid="stSidebar"] {
-        background-color: #FFFFFF !important;
-        border-right: 1px solid #EFE3EC;
+        background: linear-gradient(180deg, #35233F 0%, #24172F 100%) !important;
+        border-right: 1px solid #704B77;
         box-shadow: 2px 0 16px rgba(67, 51, 76, 0.04);
     }
     section[data-testid="stSidebar"] h1, 
     section[data-testid="stSidebar"] h2, 
     section[data-testid="stSidebar"] h3 {
-        color: #43334C !important;
+        color: #FFF3FC !important;
         font-weight: 600;
+    }
+
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] p {
+        color: #FFF3FC;
+    }
+    section[data-testid="stSidebar"] [data-baseweb="select"] > div {
+        background: #FFE3F3 !important;
+        border-radius: 10px !important;
+    }
+    section[data-testid="stSidebar"] [data-baseweb="select"] * {
+        color: #432348 !important;
     }
 
     /* Sidebar brand card */
     .sidebar-brand-card {
-        background: linear-gradient(135deg, #E83C91 0%, #843A7D 100%);
+        background: linear-gradient(135deg, #542E62 0%, #8E357A 100%);
         border-radius: 16px;
         padding: 18px 20px;
         color: #FFFFFF;
@@ -61,11 +79,11 @@ def get_custom_css():
 
     /* Main Area Header */
     .main-header-banner {
-        background: #FFFFFF;
-        border: 1px solid #EFE3EC;
-        border-radius: 20px;
-        padding: 24px 28px;
-        margin-bottom: 24px;
+        background: linear-gradient(115deg, #FFF4FA 0%, #F7D6E9 60%, #E8C4E8 100%);
+        border: 1px solid #EFC5DD;
+        border-radius: 18px;
+        padding: 18px 24px;
+        margin-bottom: 14px;
         box-shadow: 0 4px 24px rgba(67, 51, 76, 0.04);
         display: flex;
         justify-content: space-between;
@@ -74,15 +92,15 @@ def get_custom_css():
         gap: 16px;
     }
     .main-header-title {
-        font-size: 1.8rem;
+        font-size: 1.7rem;
         font-weight: 700;
         color: #43334C;
         margin: 0;
         line-height: 1.2;
     }
     .main-header-subtitle {
-        font-size: 0.95rem;
-        color: #7A6882;
+        font-size: 0.88rem;
+        color: #74476A;
         margin: 6px 0 0 0;
     }
 
@@ -119,12 +137,12 @@ def get_custom_css():
     .kpi-grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-        gap: 18px;
-        margin-bottom: 28px;
+        gap: 12px;
+        margin-bottom: 16px;
     }
     .kpi-card {
-        border-radius: 20px;
-        padding: 22px 24px;
+        border-radius: 16px;
+        padding: 18px 20px;
         color: #FFFFFF;
         position: relative;
         overflow: hidden;
@@ -142,10 +160,10 @@ def get_custom_css():
         background: linear-gradient(135deg, #843A7D 0%, #5E2659 100%);
     }
     .kpi-card-3 {
-        background: linear-gradient(135deg, #57C7FF 0%, #30A4DF 100%);
+        background: linear-gradient(135deg, #B74B94 0%, #713574 100%);
     }
     .kpi-card-4 {
-        background: linear-gradient(135deg, #F7A531 0%, #E08512 100%);
+        background: linear-gradient(135deg, #8C4E9C 0%, #43334C 100%);
     }
     .kpi-title {
         font-size: 0.9rem;
@@ -177,9 +195,9 @@ def get_custom_css():
     .bento-card {
         background: #FFFFFF;
         border: 1px solid #EFE3EC;
-        border-radius: 20px;
-        padding: 24px;
-        margin-bottom: 24px;
+        border-radius: 16px;
+        padding: 15px 18px;
+        margin-bottom: 10px;
         box-shadow: 0 4px 20px rgba(67, 51, 76, 0.04);
         transition: box-shadow 0.2s ease;
     }
@@ -187,7 +205,7 @@ def get_custom_css():
         box-shadow: 0 8px 28px rgba(67, 51, 76, 0.07);
     }
     .bento-card-title {
-        font-size: 1.15rem;
+        font-size: 1rem;
         font-weight: 600;
         color: #43334C;
         margin: 0 0 4px 0;
@@ -196,9 +214,9 @@ def get_custom_css():
         gap: 8px;
     }
     .bento-card-subtitle {
-        font-size: 0.85rem;
-        color: #7A6882;
-        margin-bottom: 16px;
+        font-size: 0.78rem;
+        color: #966E8D;
+        margin-bottom: 8px;
     }
 
     /* Alert / Caveat Box */
@@ -220,22 +238,22 @@ def get_custom_css():
 
     /* Tab bar styling */
     .stTabs [data-baseweb="tab-list"] {
-        gap: 12px;
+        gap: 6px;
         background-color: transparent;
         padding-bottom: 8px;
     }
     .stTabs [data-baseweb="tab"] {
         background-color: #FFFFFF !important;
         border: 1px solid #EFE3EC !important;
-        border-radius: 14px !important;
-        padding: 10px 22px !important;
+        border-radius: 12px !important;
+        padding: 9px 14px !important;
         color: #43334C !important;
         font-weight: 500 !important;
         font-size: 0.95rem !important;
         transition: all 0.2s ease !important;
     }
     .stTabs [aria-selected="true"] {
-        background: #843A7D !important;
+        background: linear-gradient(90deg, #ED3D94, #9E3F88) !important;
         color: #FFFFFF !important;
         border-color: #843A7D !important;
         box-shadow: 0 4px 14px rgba(132, 58, 125, 0.25) !important;

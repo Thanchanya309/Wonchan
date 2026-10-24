@@ -7,6 +7,12 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 
+# This component returns Plotly click events (native Streamlit selection is not a click).
+try:
+    from streamlit_plotly_events import plotly_events
+except ImportError:
+    plotly_events = None
+
 # Page configuration
 st.set_page_config(
     page_title="Thailand Labor Market Analytics | แดชบอร์ดตลาดแรงงานไทย",
@@ -61,6 +67,18 @@ st.markdown(get_custom_css(), unsafe_allow_html=True)
 # Initialize filter state
 init_filter_state()
 filters = get_current_filters()
+
+# A selected map region is applied before the sidebar widget is created.
+# Streamlit does not allow writing to an existing widget key after its creation.
+if st.session_state.pop('_pending_map_sidebar_sync', False):
+    st.session_state['sb_region'] = filters.get('region', 'ทั้งหมด')
+if st.session_state.pop('_pending_reset_sidebar_sync', False):
+    sidebar_widget_keys = {
+        'year': 'sb_year', 'quarter': 'sb_quarter', 'region': 'sb_region',
+        'area': 'sb_area', 'sex': 'sb_sex', 'age_group': 'sb_age',
+    }
+    for dimension, widget_key in sidebar_widget_keys.items():
+        st.session_state[widget_key] = filters.get(dimension, 'ทั้งหมด')
 
 # Load dataset
 try:
@@ -171,6 +189,7 @@ with st.sidebar:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("🔄 รีเซ็ตตัวกรองทั้งหมด", type="primary", use_container_width=True):
         reset_all_filters()
+        st.session_state['_pending_reset_sidebar_sync'] = True
         st.rerun()
 
     st.markdown("---")
@@ -234,55 +253,38 @@ if caveats:
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# Top KPI Bento Grid
-col1, col2, col3, col4 = st.columns(4)
+# Show only KPI cards backed by actual values for the active filters.
+# Create columns dynamically, so absent indicators leave no blank placeholders.
+def valid_metric(value):
+    try:
+        return value is not None and bool(np.isfinite(float(value)))
+    except (TypeError, ValueError):
+        return False
 
-with col1:
-    wage_disp = f"{kpis['avg_wage']:,.0f}" if kpis['avg_wage'] is not None else "ไม่มีข้อมูล"
-    st.markdown(f"""
-    <div class="kpi-card kpi-card-1">
-        <div class="kpi-title">💵 ค่าจ้างเฉลี่ย</div>
-        <div class="kpi-value">{wage_disp}<span class="kpi-unit">บาท/เดือน</span></div>
-        <div class="kpi-subtext">ประชากรมีงานทำที่เป็นลูกจ้าง</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-with col2:
-    emp_disp = f"{kpis['emp_rate']:.2f}" if kpis['emp_rate'] is not None else "ไม่มีข้อมูล"
-    st.markdown(f"""
-    <div class="kpi-card kpi-card-2">
-        <div class="kpi-title">📈 อัตราการมีงานทำ</div>
-        <div class="kpi-value">{emp_disp}<span class="kpi-unit">%</span></div>
-        <div class="kpi-subtext">สัดส่วนต่อกำลังแรงงานรวม</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-with col3:
-    unemp_disp = f"{kpis['unemp_rate']:.2f}" if kpis['unemp_rate'] is not None else "ไม่มีข้อมูล"
-    st.markdown(f"""
-    <div class="kpi-card kpi-card-3">
-        <div class="kpi-title">⚠️ อัตราการว่างงาน</div>
-        <div class="kpi-value">{unemp_disp}<span class="kpi-unit">%</span></div>
-        <div class="kpi-subtext">สัดส่วนผู้ว่างงานต่อกำลังแรงงาน</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-with col4:
-    if kpis['emp_headcount_m'] is not None:
-        hc_disp = f"{kpis['emp_headcount_m']:.2f}"
-        hc_unit = "ล้านคน"
-        hc_sub = f"({kpis['emp_headcount_k']:,.1f} พันคน)"
-    else:
-        hc_disp = "ไม่มีข้อมูล"
-        hc_unit = ""
-        hc_sub = ""
-    st.markdown(f"""
-    <div class="kpi-card kpi-card-4">
-        <div class="kpi-title">👥 ประชากรผู้มีงานทำ</div>
-        <div class="kpi-value">{hc_disp}<span class="kpi-unit">{hc_unit}</span></div>
-        <div class="kpi-subtext">{hc_sub}</div>
-    </div>
-    """, unsafe_allow_html=True)
+kpi_items = [
+    ('avg_wage', '💵 ค่าจ้างเฉลี่ย', 'บาท/เดือน', 'ประชากรมีงานทำที่เป็นลูกจ้าง', 'kpi-card-1', ',.0f'),
+    ('emp_rate', '📈 อัตราการมีงานทำ', '%', 'สัดส่วนต่อกำลังแรงงานรวม', 'kpi-card-2', '.2f'),
+    ('unemp_rate', '⚠️ อัตราการว่างงาน', '%', 'สัดส่วนผู้ว่างงานต่อกำลังแรงงาน', 'kpi-card-3', '.2f'),
+    ('emp_headcount_m', '👥 ประชากรผู้มีงานทำ', 'ล้านคน', '', 'kpi-card-4', '.2f'),
+]
+available_kpis = [item for item in kpi_items if valid_metric(kpis.get(item[0]))]
+if available_kpis:
+    for col, (metric, title, unit, note, color_class, num_format) in zip(
+        st.columns(len(available_kpis)), available_kpis
+    ):
+        with col:
+            value_text = format(float(kpis[metric]), num_format)
+            if metric == 'emp_headcount_m' and valid_metric(kpis.get('emp_headcount_k')):
+                note = f"({float(kpis['emp_headcount_k']):,.1f} พันคน)"
+            st.markdown(f"""
+            <div class="kpi-card {color_class}">
+                <div class="kpi-title">{title}</div>
+                <div class="kpi-value">{value_text}<span class="kpi-unit">{unit}</span></div>
+                <div class="kpi-subtext">{note}</div>
+            </div>
+            """, unsafe_allow_html=True)
+else:
+    st.caption('ไม่มีตัวชี้วัด KPI ที่รองรับตัวกรองนี้')
 
 st.markdown("<br>", unsafe_allow_html=True)
 
@@ -302,80 +304,150 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # TAB 1: ภาพรวมตลาดแรงงานไทย (MACRO OVERVIEW)
 # -------------------------------------------------------------
 with tab1:
+    # Map is the main interaction point of the overview.
+    st.markdown("### 🗺️ สำรวจตลาดแรงงานรายภูมิภาค")
+    full_region_data = get_regional_comparison_data(df, filters)
+    map_metric = st.selectbox(
+        'เลือกตัวชี้วัดบนแผนที่',
+        ['emp_rate', 'unemp_rate', 'avg_wage'],
+        format_func=lambda x: {
+            'emp_rate': 'อัตราการมีงานทำ (%)',
+            'unemp_rate': 'อัตราการว่างงาน (%)',
+            'avg_wage': 'ค่าจ้างเฉลี่ย (บาท/เดือน)',
+        }[x],
+        key='overview_map_metric',
+    )
+    valid_regions = full_region_data.dropna(subset=[map_metric]).copy()
+    if not valid_regions.empty:
+        main_map, map_detail = st.columns([2.4, 1], gap='medium')
+        with main_map:
+            with st.container(border=True):
+                selected_region = filters.get('region', 'ทั้งหมด')
+                if selected_region != 'ทั้งหมด':
+                    st.caption(f'📍 เลือกอยู่: {selected_region} — แผนที่ขยายเพื่อแสดงภูมิภาคนี้')
+                map_fig = create_thailand_map(
+                    valid_regions, metric=map_metric, year=filters['year'],
+                    selected_region=selected_region,
+                )
+                if plotly_events is not None:
+                    # IMPORTANT: exactly one map trace; pointNumber indexes trace.locations.
+                    clicked = plotly_events(
+                        map_fig, click_event=True, select_event=False,
+                        hover_event=False, override_height=650,
+                        key=f"regional_map_click_{filters['year']}_{selected_region}_{map_metric}",
+                    )
+                    if clicked:
+                        point = clicked[0]
+                        names = list(map_fig.data[0].locations) if map_fig.data else []
+                        position = point.get('pointNumber', point.get('pointIndex'))
+                        candidate = names[position] if isinstance(position, int) and 0 <= position < len(names) else None
+                        if candidate and candidate != selected_region:
+                            set_filter('region', candidate)
+                            st.session_state['_pending_map_sidebar_sync'] = True
+                            st.rerun()
+                else:
+                    st.plotly_chart(map_fig, use_container_width=True,
+                                    config={'displayModeBar': False})
+                    st.info('ติดตั้ง streamlit-plotly-events เพื่อเปิดการคลิกแผนที่: python -m pip install -r requirements.txt')
+        with map_detail:
+            with st.container(border=True):
+                st.markdown('**📌 รายละเอียดภูมิภาค**')
+                if filters['region'] != 'ทั้งหมด':
+                    st.markdown(f"### {filters['region']}")
+                    if st.button('↩️ กลับไปดูทั้งประเทศ', key='overview_map_reset',
+                                 use_container_width=True):
+                        clear_filter('region')
+                        st.session_state['_pending_map_sidebar_sync'] = True
+                        st.rerun()
+                    regional_kpis = get_kpis(df, filters)
+                    for field, label, unit in [
+                        ('emp_rate', 'อัตราการมีงานทำ', '%'),
+                        ('unemp_rate', 'อัตราการว่างงาน', '%'),
+                        ('avg_wage', 'ค่าจ้างเฉลี่ย', 'บาท/เดือน'),
+                    ]:
+                        value = regional_kpis.get(field)
+                        if valid_metric(value):
+                            st.metric(label, f'{float(value):,.2f} {unit}')
+                else:
+                    st.markdown('**ประเทศไทย**')
+                    st.caption('คลิกภูมิภาคบนแผนที่ หรือกดชื่อภาคด้านล่าง เพื่อซูมและกรองทั้ง Dashboard')
+                # Dependable alternative to map clicks for all browsers and devices.
+                st.markdown('**เลือกภาค:**')
+                for region in valid_regions['region'].astype(str).tolist():
+                    if st.button('📍 ' + region, key='map_region_btn_' + region,
+                                 use_container_width=True):
+                        set_filter('region', region)
+                        st.session_state['_pending_map_sidebar_sync'] = True
+                        st.rerun()
+    else:
+        st.caption('ไม่มีข้อมูลรายภาคที่รองรับตัวชี้วัดและช่วงเวลาที่เลือก')
+
     ts_data, wage_data = get_time_series_data(df, filters)
 
-    st.markdown("""
-    <div class="bento-card">
-        <div class="bento-card-title">📈 แนวโน้มอัตราการมีงานทำและอัตราการว่างงานตามเวลา</div>
-        <div class="bento-card-subtitle">แสดงการเคลื่อนไหวของตลาดแรงงานรายปีและรายไตรมาส (คลิกเลือกจุดบนกราฟเพื่อกรองปี/ไตรมาส)</div>
-    </div>
-    """, unsafe_allow_html=True)
+    if valid_metric(kpis.get('emp_rate')) or valid_metric(kpis.get('unemp_rate')):
+        with st.container(border=True):
+            st.markdown("**📈 แนวโน้มอัตราการมีงานทำและอัตราการว่างงานตามเวลา**")
+            st.caption("แสดงการเคลื่อนไหวของตลาดแรงงานรายปีและรายไตรมาส (คลิกเลือกจุดบนกราฟเพื่อกรองปี/ไตรมาส)")
 
-    fig_rates_ts = create_time_series_chart(ts_data)
-    event_rates = st.plotly_chart(
-        fig_rates_ts,
-        use_container_width=True,
-        on_select="rerun",
-        selection_mode="points",
-        key="chart_rates_ts"
-    )
-    if handle_chart_selection(event_rates, 'year', value_key='customdata'):
-        st.rerun()
+            fig_rates_ts = create_time_series_chart(ts_data)
+            event_rates = st.plotly_chart(
+                fig_rates_ts,
+                use_container_width=True,
+                on_select="rerun",
+                selection_mode="points",
+                key="chart_rates_ts"
+            )
+            if handle_chart_selection(event_rates, 'year', value_key='customdata'):
+                st.rerun()
 
     c1, c2 = st.columns(2)
 
     with c1:
-        st.markdown("""
-        <div class="bento-card">
-            <div class="bento-card-title">💵 ทิศทางการเติบโตของค่าจ้างเฉลี่ย (บาท/เดือน)</div>
-            <div class="bento-card-subtitle">ค่าจ้างเฉลี่ยรายปีตามตัวกรองที่เลือก (คลิกจุดปีบนกราฟเพื่อเจาะจงปี)</div>
-        </div>
-        """, unsafe_allow_html=True)
-        fig_wage_trend = create_wage_trend_chart(ts_data, wage_data)
-        event_wage = st.plotly_chart(
-            fig_wage_trend,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="points",
-            key="chart_wage_trend"
-        )
-        if handle_chart_selection(event_wage, 'year', value_key='customdata'):
-            st.rerun()
+        if valid_metric(kpis.get('avg_wage')):
+            with st.container(border=True):
+                st.markdown("**💵 ทิศทางการเติบโตของค่าจ้างเฉลี่ย (บาท/เดือน)**")
+                st.caption("ค่าจ้างเฉลี่ยรายปีตามตัวกรองที่เลือก (คลิกจุดปีบนกราฟเพื่อเจาะจงปี)")
+                fig_wage_trend = create_wage_trend_chart(ts_data, wage_data)
+                event_wage = st.plotly_chart(
+                    fig_wage_trend,
+                    use_container_width=True,
+                    on_select="rerun",
+                    selection_mode="points",
+                    key="chart_wage_trend"
+                )
+                if handle_chart_selection(event_wage, 'year', value_key='customdata'):
+                    st.rerun()
 
     with c2:
-        st.markdown("""
-        <div class="bento-card">
-            <div class="bento-card-title">🌾 การเปลี่ยนแปลงตามฤดูกาลในแต่ละไตรมาส (Seasonality)</div>
-            <div class="bento-card-subtitle">เปรียบเทียบอัตราว่างงานเฉลี่ย Q1 (แล้ง) ถึง Q4 (เก็บเกี่ยว) ชี้ชัดผลกระทบภาคเกษตรกรรม</div>
-        </div>
-        """, unsafe_allow_html=True)
-        fig_season = create_seasonality_chart(df, filters)
-        event_season = st.plotly_chart(
-            fig_season,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="points",
-            key="chart_seasonality"
-        )
-        if handle_chart_selection(event_season, 'quarter', value_key='customdata'):
-            st.rerun()
+        if valid_metric(kpis.get('unemp_rate')) and filters.get('quarter', 'ทั้งหมด') == 'ทั้งหมด':
+            with st.container(border=True):
+                st.markdown("**🌾 การเปลี่ยนแปลงตามฤดูกาลในแต่ละไตรมาส (Seasonality)**")
+                st.caption("เปรียบเทียบอัตราว่างงานเฉลี่ย Q1 (แล้ง) ถึง Q4 (เก็บเกี่ยว) ชี้ชัดผลกระทบภาคเกษตรกรรม")
+                fig_season = create_seasonality_chart(df, filters)
+                event_season = st.plotly_chart(
+                    fig_season,
+                    use_container_width=True,
+                    on_select="rerun",
+                    selection_mode="points",
+                    key="chart_seasonality"
+                )
+                if handle_chart_selection(event_season, 'quarter', value_key='customdata'):
+                    st.rerun()
 
-    st.markdown("""
-    <div class="bento-card">
-        <div class="bento-card-title">👥 จำนวนผู้มีงานทำรวมของประเทศตามช่วงเวลา (ล้านคน)</div>
-        <div class="bento-card-subtitle">สะท้อนขนาดกำลังแรงงานที่แท้จริงจากประมาณการประชากร (2555 - 2569)</div>
-    </div>
-    """, unsafe_allow_html=True)
-    fig_hc_trend = create_headcount_trend_chart(ts_data)
-    event_hc = st.plotly_chart(
-        fig_hc_trend,
-        use_container_width=True,
-        on_select="rerun",
-        selection_mode="points",
-        key="chart_hc_trend"
-    )
-    if handle_chart_selection(event_hc, 'year', value_key='customdata'):
-        st.rerun()
+    if valid_metric(kpis.get('emp_headcount_m')):
+        with st.container(border=True):
+            st.markdown("**👥 จำนวนผู้มีงานทำรวมของประเทศตามช่วงเวลา (ล้านคน)**")
+            st.caption("สะท้อนขนาดกำลังแรงงานที่แท้จริงจากประมาณการประชากร (2555 - 2569)")
+            fig_hc_trend = create_headcount_trend_chart(ts_data)
+            event_hc = st.plotly_chart(
+                fig_hc_trend,
+                use_container_width=True,
+                on_select="rerun",
+                selection_mode="points",
+                key="chart_hc_trend"
+            )
+            if handle_chart_selection(event_hc, 'year', value_key='customdata'):
+                st.rerun()
 
 
 # -------------------------------------------------------------
@@ -385,86 +457,66 @@ with tab2:
     reg_data = get_regional_comparison_data(df, filters)
     area_data = get_area_wage_comparison_data(df, filters)
 
-    m_col1, m_col2 = st.columns([1, 3])
-    with m_col1:
-        map_metric = st.selectbox(
-            "เลือกตัวชี้วัดสำหรับแผนที่และการจัดอันดับ:",
-            options=['avg_wage', 'unemp_rate', 'emp_rate'],
-            format_func=lambda x: '💵 ค่าจ้างเฉลี่ย (บาท/เดือน)' if x == 'avg_wage' else ('⚠️ อัตราการว่างงาน (%)' if x == 'unemp_rate' else '📈 อัตราการมีงานทำ (%)'),
-            key="sb_map_metric"
-        )
-
-    col_map, col_rank = st.columns([1.1, 1])
-
-    with col_map:
-        st.markdown(f"""
-        <div class="bento-card">
-            <div class="bento-card-title">🗺️ แผนที่ภูมิภาคประเทศไทย (Choropleth Map)</div>
-            <div class="bento-card-subtitle">แสดงความเข้มของตัวชี้วัดตามภูมิภาคประจำปี พ.ศ. {filters.get('year', 2568)}</div>
-        </div>
-        """, unsafe_allow_html=True)
-        fig_map = create_thailand_map(reg_data, metric=map_metric, year=filters.get('year', 2568))
-        st.plotly_chart(fig_map, use_container_width=True, key="chart_regional_map")
+    # Map lives in Tab 1. Tab 2 keeps regional comparisons.
+    map_metric = st.session_state.get('overview_map_metric', 'emp_rate')
+    col_rank = st.container()
 
     with col_rank:
-        st.markdown("""
-        <div class="bento-card">
-            <div class="bento-card-title">🏆 การจัดอันดับภูมิภาค (Regional Ranking)</div>
-            <div class="bento-card-subtitle">เปรียบเทียบค่าชี้วัดรายภาค (คลิกที่แท่งภูมิภาคเพื่อกรองข้อมูลเฉพาะภาคนั้น)</div>
-        </div>
-        """, unsafe_allow_html=True)
-        fig_reg_rank = create_regional_ranking_chart(
-            reg_data,
-            metric=map_metric,
-            selected_region=filters.get('region') if filters.get('region') != 'ทั้งหมด' else None
-        )
-        event_rank = st.plotly_chart(
-            fig_reg_rank,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="points",
-            key="chart_regional_rank"
-        )
-        if handle_chart_selection(event_rank, 'region', value_key='customdata'):
-            st.rerun()
+        if valid_metric(kpis.get(map_metric)) and not reg_data.empty:
+            with st.container(border=True):
+                st.markdown("**🏆 การจัดอันดับภูมิภาค (Regional Ranking)**")
+                st.caption("เปรียบเทียบค่าชี้วัดรายภาค (คลิกที่แท่งภูมิภาคเพื่อกรองข้อมูลเฉพาะภาคนั้น)")
+                fig_reg_rank = create_regional_ranking_chart(
+                    reg_data,
+                    metric=map_metric,
+                    selected_region=filters.get('region') if filters.get('region') != 'ทั้งหมด' else None
+                )
+                event_rank = st.plotly_chart(
+                    fig_reg_rank,
+                    use_container_width=True,
+                    on_select="rerun",
+                    selection_mode="points",
+                    key="chart_regional_rank"
+                )
+                if handle_chart_selection(event_rank, 'region', value_key='customdata'):
+                    st.session_state['_pending_map_sidebar_sync'] = True
+                    st.rerun()
 
     c_scat, c_dumb = st.columns(2)
 
     with c_scat:
-        st.markdown("""
-        <div class="bento-card">
-            <div class="bento-card-title">⚖️ ค่าจ้างเฉลี่ย vs อัตราการมีงานทำ (Scatter Bubble)</div>
-            <div class="bento-card-subtitle">ความสัมพันธ์ระหว่างระดับค่าจ้างและอัตรามีงานทำ (ขนาดฟอง = ประชากรทำงาน)</div>
-        </div>
-        """, unsafe_allow_html=True)
-        fig_scatter = create_wage_vs_employment_scatter(reg_data)
-        event_scat = st.plotly_chart(
-            fig_scatter,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="points",
-            key="chart_wage_scatter"
-        )
-        if handle_chart_selection(event_scat, 'region', value_key='customdata'):
-            st.rerun()
+        if valid_metric(kpis.get('avg_wage')) and valid_metric(kpis.get('emp_rate')) and not reg_data.empty:
+            with st.container(border=True):
+                st.markdown("**⚖️ ค่าจ้างเฉลี่ย vs อัตราการมีงานทำ (Scatter Bubble)**")
+                st.caption("ความสัมพันธ์ระหว่างระดับค่าจ้างและอัตรามีงานทำ (ขนาดฟอง = ประชากรทำงาน)")
+                fig_scatter = create_wage_vs_employment_scatter(reg_data)
+                event_scat = st.plotly_chart(
+                    fig_scatter,
+                    use_container_width=True,
+                    on_select="rerun",
+                    selection_mode="points",
+                    key="chart_wage_scatter"
+                )
+                if handle_chart_selection(event_scat, 'region', value_key='customdata'):
+                    st.session_state['_pending_map_sidebar_sync'] = True
+                    st.rerun()
 
     with c_dumb:
-        st.markdown("""
-        <div class="bento-card">
-            <div class="bento-card-title">🏙️ ช่องว่างค่าจ้างเมือง vs ชนบท (Dumbbell Chart)</div>
-            <div class="bento-card-subtitle">เปรียบเทียบค่าจ้างในเขตเทศบาลเทียบกับนอกเขตเทศบาลในแต่ละภาค</div>
-        </div>
-        """, unsafe_allow_html=True)
-        fig_dumb = create_dumbbell_wage_chart(area_data)
-        event_dumb = st.plotly_chart(
-            fig_dumb,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="points",
-            key="chart_area_dumbbell"
-        )
-        if handle_chart_selection(event_dumb, 'region', value_key='customdata'):
-            st.rerun()
+        if valid_metric(kpis.get('avg_wage')) and not area_data.empty:
+            with st.container(border=True):
+                st.markdown("**🏙️ ช่องว่างค่าจ้างเมือง vs ชนบท (Dumbbell Chart)**")
+                st.caption("เปรียบเทียบค่าจ้างในเขตเทศบาลเทียบกับนอกเขตเทศบาลในแต่ละภาค")
+                fig_dumb = create_dumbbell_wage_chart(area_data)
+                event_dumb = st.plotly_chart(
+                    fig_dumb,
+                    use_container_width=True,
+                    on_select="rerun",
+                    selection_mode="points",
+                    key="chart_area_dumbbell"
+                )
+                if handle_chart_selection(event_dumb, 'region', value_key='customdata'):
+                    st.session_state['_pending_map_sidebar_sync'] = True
+                    st.rerun()
 
 
 # -------------------------------------------------------------
@@ -477,70 +529,62 @@ with tab3:
     g_col1, g_col2 = st.columns(2)
 
     with g_col1:
-        st.markdown("""
-        <div class="bento-card">
-            <div class="bento-card-title">👫 ช่องว่างค่าจ้างระหว่างเพศ (Gender Wage Gap)</div>
-            <div class="bento-card-subtitle">เปรียบเทียบค่าจ้างเฉลี่ยชาย vs หญิง (คลิกแท่งเพื่อกรองเฉพาะเพศนั้น)</div>
-        </div>
-        """, unsafe_allow_html=True)
-        fig_gender = create_gender_gap_chart(gender_data)
-        event_gender = st.plotly_chart(
-            fig_gender,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="points",
-            key="chart_gender_gap"
-        )
-        if handle_chart_selection(event_gender, 'sex', value_key='customdata'):
-            st.rerun()
+        if valid_metric(kpis.get('avg_wage')) and not gender_data.empty:
+            with st.container(border=True):
+                st.markdown("**👫 ช่องว่างค่าจ้างระหว่างเพศ (Gender Wage Gap)**")
+                st.caption("เปรียบเทียบค่าจ้างเฉลี่ยชาย vs หญิง (คลิกแท่งเพื่อกรองเฉพาะเพศนั้น)")
+                fig_gender = create_gender_gap_chart(gender_data)
+                event_gender = st.plotly_chart(
+                    fig_gender,
+                    use_container_width=True,
+                    on_select="rerun",
+                    selection_mode="points",
+                    key="chart_gender_gap"
+                )
+                if handle_chart_selection(event_gender, 'sex', value_key='customdata'):
+                    st.rerun()
 
     with g_col2:
-        st.markdown("""
-        <div class="bento-card">
-            <div class="bento-card-title">📊 โครงสร้างความหนาแน่นแรงงาน (Matrix Heatmap)</div>
-            <div class="bento-card-subtitle">การกระจายตัวของจำนวนผู้มีงานทำ (ล้านคน) ตามเพศและช่วงอายุ</div>
-        </div>
-        """, unsafe_allow_html=True)
-        fig_heat = create_demographic_matrix_heatmap(df, filters)
-        st.plotly_chart(fig_heat, use_container_width=True, key="chart_demo_heatmap")
+        if valid_metric(kpis.get('emp_headcount_m')):
+            with st.container(border=True):
+                st.markdown("**📊 โครงสร้างความหนาแน่นแรงงาน (Matrix Heatmap)**")
+                st.caption("การกระจายตัวของจำนวนผู้มีงานทำ (ล้านคน) ตามเพศและช่วงอายุ")
+                fig_heat = create_demographic_matrix_heatmap(df, filters)
+                st.plotly_chart(fig_heat, use_container_width=True, key="chart_demo_heatmap")
 
     a_col1, a_col2 = st.columns(2)
 
     with a_col1:
-        st.markdown("""
-        <div class="bento-card">
-            <div class="bento-card-title">📈 โครงสร้างค่าจ้างตามวัย (Age-Wage Curve)</div>
-            <div class="bento-card-subtitle">ค่าจ้างเฉลี่ยไต่ระดับตามอายุ และสูงสุดที่วัย 40-59 ปี (คลิกเพื่อกรองช่วงอายุ)</div>
-        </div>
-        """, unsafe_allow_html=True)
-        fig_age_wage = create_age_wage_chart(age_data)
-        event_age_wage = st.plotly_chart(
-            fig_age_wage,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="points",
-            key="chart_age_wage"
-        )
-        if handle_chart_selection(event_age_wage, 'age_group', value_key='customdata'):
-            st.rerun()
+        if valid_metric(kpis.get('avg_wage')) and not age_data.empty:
+            with st.container(border=True):
+                st.markdown("**📈 โครงสร้างค่าจ้างตามวัย (Age-Wage Curve)**")
+                st.caption("ค่าจ้างเฉลี่ยไต่ระดับตามอายุ และสูงสุดที่วัย 40-59 ปี (คลิกเพื่อกรองช่วงอายุ)")
+                fig_age_wage = create_age_wage_chart(age_data)
+                event_age_wage = st.plotly_chart(
+                    fig_age_wage,
+                    use_container_width=True,
+                    on_select="rerun",
+                    selection_mode="points",
+                    key="chart_age_wage"
+                )
+                if handle_chart_selection(event_age_wage, 'age_group', value_key='customdata'):
+                    st.rerun()
 
     with a_col2:
-        st.markdown("""
-        <div class="bento-card">
-            <div class="bento-card-title">🚨 การว่างงานในกลุ่มเยาวชน (Youth Unemployment)</div>
-            <div class="bento-card-subtitle">อัตราว่างงานช่วง 15-24 ปี สูงกว่าวัยผู้ใหญ่อย่างมีนัยสำคัญ (คลิกเพื่อกรอง)</div>
-        </div>
-        """, unsafe_allow_html=True)
-        fig_youth = create_youth_unemployment_chart(age_data)
-        event_youth = st.plotly_chart(
-            fig_youth,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="points",
-            key="chart_youth_unemp"
-        )
-        if handle_chart_selection(event_youth, 'age_group', value_key='customdata'):
-            st.rerun()
+        if valid_metric(kpis.get('unemp_rate')) and not age_data.empty:
+            with st.container(border=True):
+                st.markdown("**🚨 การว่างงานในกลุ่มเยาวชน (Youth Unemployment)**")
+                st.caption("อัตราว่างงานช่วง 15-24 ปี สูงกว่าวัยผู้ใหญ่อย่างมีนัยสำคัญ (คลิกเพื่อกรอง)")
+                fig_youth = create_youth_unemployment_chart(age_data)
+                event_youth = st.plotly_chart(
+                    fig_youth,
+                    use_container_width=True,
+                    on_select="rerun",
+                    selection_mode="points",
+                    key="chart_youth_unemp"
+                )
+                if handle_chart_selection(event_youth, 'age_group', value_key='customdata'):
+                    st.rerun()
 
 
 # -------------------------------------------------------------
