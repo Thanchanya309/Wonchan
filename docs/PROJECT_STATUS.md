@@ -16,8 +16,8 @@
 | **Step 3: ข้อกำหนดแดชบอร์ด (Dashboard Spec)** | จัดทำ DASHBOARD_SPEC.md พร้อมโครงสร้างแท็บและสเปกชาร์ตทั้งหมด | ✅ เสร็จสมบูรณ์ (Completed) | กำหนดสเปกและ Click Event ครบ 4 แท็บ |
 | **Step 4: โมดูลคำนวณและสไตล์การแสดงผล** | พัฒนา `src/metrics.py`, `src/styles.py`, `src/filters.py`, `src/charts.py` และเตรียม GeoJSON | ✅ เสร็จสมบูรณ์ (Completed) | ผ่านการทดสอบคำนวณและสร้างชาร์ตครบถ้วน |
 | **Step 5: แดชบอร์ดหลักและระบบ Cross-Filtering** | พัฒนา `app.py` เชื่อมโยงกราฟด้วย `st.plotly_chart(..., on_select="rerun")` | ✅ เสร็จสมบูรณ์ (Completed) | พัฒนา UI ครบ 4 แท็บ พร้อมระบบ Cross-filtering |
-| **Step 6: การทดสอบระบบ (Testing & Verification)** | สร้างชุดทดสอบใน `tests/`, รันคำสั่งทดสอบ, จัดทำ `docs/TEST_REPORT.md` | 🔄 กำลังดำเนินการ (In Progress) | อยู่ระหว่างทดสอบระบบและเขียนรายงาน |
-| **Step 7: สรุปงานและส่งมอบผ่าน Git** | ตรวจสอบ git status, commit และ push สู่ GitHub repository | ⏳ รอการดำเนินงาน (Pending) | ขั้นตอนสุดท้าย |
+| **Step 6: การทดสอบระบบ (Testing & Verification)** | สร้างชุดทดสอบใน `tests/`, รันคำสั่งทดสอบ, จัดทำ `docs/TEST_REPORT.md` | ✅ เสร็จสมบูรณ์ (Completed) | ผ่านการทดสอบ Unit Tests และ Streamlit Runtime |
+| **Step 7: สรุปงานและส่งมอบผ่าน Git** | ตรวจสอบ git status, commit และ push สู่ GitHub repository | 🔄 กำลังดำเนินการ (In Progress) | อยู่ระหว่างตรวจสอบและส่งมอบ |
 
 ---
 
