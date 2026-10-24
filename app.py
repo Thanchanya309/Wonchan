@@ -1,664 +1,1954 @@
+
 """
-Thailand Labor Market Interactive Analytics Dashboard
-Built with Streamlit, Pandas, and Plotly
-Features: Bi-directional Cross-filtering, Modern Admin Bento Grid, Official NSO Statistical Rules
+Thailand Labor Market Analytics Dashboard
+Global Cross-filtering Edition
+
+Main features
+-------------
+1. Years 2561-2568 only.
+2. Shared filters across all three tabs.
+3. Clicking a year updates the global year filter.
+4. The clicked year drills into Q1-Q4.
+5. Clicking a region updates all compatible charts.
+6. Clicking an age group updates all compatible charts.
+7. Full-country map at first; regional detail after selection.
+8. Regional comparison charts retain all regions for reselection.
+9. Uses actual data only; never averages percentage rates
+   to fabricate missing observations.
 """
-import streamlit as st
-import pandas as pd
+
+import html
+
 import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
 
-# This component returns Plotly click events (native Streamlit selection is not a click).
-try:
-    from streamlit_plotly_events import plotly_events
-except ImportError:
-    plotly_events = None
-
-# Page configuration
 st.set_page_config(
-    page_title="Thailand Labor Market Analytics | แดชบอร์ดตลาดแรงงานไทย",
+    page_title="Thailand Labor Market Analytics",
     page_icon="🇹🇭",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# Import internal modules
 from src.styles import get_custom_css
-from src.data_loader import (
-    get_cached_labor_data,
-    AGE_ORDER,
-    REGION_ORDER,
-    AREA_ORDER,
-    SEX_ORDER
-)
+from src.data_loader import get_cached_labor_data, AGE_ORDER
+
 from src.filters import (
+    SIDEBAR_KEYS,
     init_filter_state,
     get_current_filters,
-    set_filter,
-    reset_all_filters,
+    sanitize_filters,
     clear_filter,
-    handle_chart_selection
+    reset_all_filters,
+    on_sidebar_change,
+    chart_key,
+    get_regions_for_year,
+    get_quarters_for_year,
 )
+
 from src.metrics import (
     get_kpis,
     get_time_series_data,
     get_regional_comparison_data,
-    get_demographics_gender_data,
     get_demographics_age_data,
-    get_area_wage_comparison_data
+    get_area_wage_comparison_data,
 )
+
 from src.charts import (
-    create_time_series_chart,
     create_wage_trend_chart,
     create_headcount_trend_chart,
     create_seasonality_chart,
     create_regional_ranking_chart,
     create_wage_vs_employment_scatter,
     create_dumbbell_wage_chart,
-    create_gender_gap_chart,
+    create_gender_headcount_donut,
     create_age_wage_chart,
     create_youth_unemployment_chart,
     create_demographic_matrix_heatmap,
-    create_thailand_map
+    create_thailand_map,
 )
 
-# Apply UI styling
-st.markdown(get_custom_css(), unsafe_allow_html=True)
 
-# Initialize filter state
-init_filter_state()
-filters = get_current_filters()
+# ============================================================
+# CONSTANTS
+# ============================================================
 
-# A selected map region is applied before the sidebar widget is created.
-# Streamlit does not allow writing to an existing widget key after its creation.
-if st.session_state.pop('_pending_map_sidebar_sync', False):
-    st.session_state['sb_region'] = filters.get('region', 'ทั้งหมด')
-if st.session_state.pop('_pending_reset_sidebar_sync', False):
-    sidebar_widget_keys = {
-        'year': 'sb_year', 'quarter': 'sb_quarter', 'region': 'sb_region',
-        'area': 'sb_area', 'sex': 'sb_sex', 'age_group': 'sb_age',
+ALL = "ทั้งหมด"
+START_YEAR = 2561
+END_YEAR = 2568
+
+PINK = "#E83C91"
+PURPLE = "#843A7D"
+DARK = "#43334C"
+GRID = "#F0E8EE"
+
+MAP_FULL_HEIGHT = 610
+MAP_SELECTED_HEIGHT = 560
+
+PLOT_CONFIG = {
+    "displayModeBar": False,
+    "scrollZoom": False,
+}
+
+LABELS = {
+    "emp_rate": "อัตราการมีงานทำ (%)",
+    "unemp_rate": "อัตราการว่างงาน (%)",
+    "avg_wage": "ค่าจ้างเฉลี่ย (บาท/เดือน)",
+}
+
+REGION_LIST_5 = [
+    "กรุงเทพมหานคร",
+    "ภาคกลาง",
+    "ภาคเหนือ",
+    "ภาคตะวันออกเฉียงเหนือ",
+    "ภาคใต้",
+]
+
+REGION_LIST_7 = REGION_LIST_5 + [
+    "ภาคตะวันออก",
+    "ภาคใต้ชายแดน",
+]
+
+
+# ============================================================
+# CSS
+# ============================================================
+
+st.markdown(
+    get_custom_css(),
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+    <style>
+    .dashboard-section-title {
+        font-size: 1.35rem;
+        font-weight: 700;
+        color: #552B65;
+        margin: 18px 0 10px;
     }
-    for dimension, widget_key in sidebar_widget_keys.items():
-        st.session_state[widget_key] = filters.get(dimension, 'ทั้งหมด')
 
-# Load dataset
+    .filter-banner {
+        background: #FBEAF5;
+        border: 1px solid #EEC8DF;
+        border-radius: 12px;
+        padding: 10px 15px;
+        color: #713574;
+        font-weight: 600;
+        margin: 10px 0;
+    }
+
+    .region-head {
+        background: linear-gradient(
+            110deg, #FCE4F2, #F0DFF4
+        );
+        border-radius: 14px;
+        padding: 18px;
+        margin-bottom: 14px;
+        color: #552B65;
+    }
+
+    .region-head h3 {
+        margin: 0;
+        font-size: 1.4rem;
+        color: #552B65;
+    }
+
+    .detail-metric {
+        background: #FFF9FD;
+        border: 1px solid #EED8E7;
+        border-radius: 12px;
+        padding: 14px 16px;
+        margin-bottom: 10px;
+    }
+
+    .detail-label {
+        color: #856985;
+        font-size: 0.86rem;
+        font-weight: 600;
+    }
+
+    .detail-value {
+        color: #713574;
+        font-size: 1.6rem;
+        font-weight: 800;
+        margin-top: 4px;
+    }
+
+    .age-insight {
+        background: linear-gradient(
+            110deg, #FFF3FA, #F8E4F2
+        );
+        border: 1px solid #F1CDDF;
+        border-radius: 14px;
+        padding: 14px;
+        margin: 8px 0 12px;
+    }
+
+    .age-insight .label {
+        color: #795D78;
+        font-size: 0.85rem;
+    }
+
+    .age-insight .value {
+        color: #D52D86;
+        font-size: 1.5rem;
+        font-weight: 800;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ============================================================
+# INITIAL STATE
+# ============================================================
+
+init_filter_state()
+
+if "filters" not in st.session_state:
+    st.session_state["filters"] = {}
+
+if "trend_drill_year" not in st.session_state:
+    st.session_state["trend_drill_year"] = None
+
+if "crossfilter_version" not in st.session_state:
+    st.session_state["crossfilter_version"] = 0
+
+if "trend_view_version" not in st.session_state:
+    st.session_state["trend_view_version"] = 0
+
+if "_pending_chart_filter" not in st.session_state:
+    st.session_state["_pending_chart_filter"] = None
+
+
+# ============================================================
+# SHARED FILTER ENGINE
+# ============================================================
+
+def _normalise_selected_value(dimension, value):
+    """Convert Plotly-selected values to sidebar types."""
+    if value is None:
+        return None
+
+    if dimension in ("year", "quarter"):
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return None
+
+    return str(value)
+
+
+def _read_selected_point(event):
+    """Read a Plotly selected point safely."""
+    try:
+        if isinstance(event, dict):
+            points = event.get(
+                "selection", {}
+            ).get("points", [])
+        else:
+            points = event.selection.points
+    except (AttributeError, KeyError, TypeError):
+        return None
+
+    if not points:
+        return None
+
+    return points[0]
+
+
+def _value_from_point(point, dimension):
+    """
+    Obtain the actual filter value from a plotted point.
+
+    Most existing charts use customdata:
+    - Region charts: customdata = region
+    - Age charts: customdata = age group
+    - Quarterly bars: customdata = quarter
+
+    For geographic charts, location is a fallback.
+    """
+    custom = point.get("customdata")
+
+    if isinstance(custom, (list, tuple, np.ndarray)):
+        value = custom[0] if len(custom) else None
+    else:
+        value = custom
+
+    if value is not None:
+        return value
+
+    if dimension == "region":
+        return (
+            point.get("location")
+            or point.get("y")
+        )
+
+    if dimension == "age_group":
+        return (
+            point.get("y")
+            or point.get("x")
+        )
+
+    if dimension == "quarter":
+        return point.get("x")
+
+    if dimension == "year":
+        return point.get("x")
+
+    return None
+
+
+def queue_chart_filter(
+    chart_widget_key,
+    dimension,
+    valid_values=None,
+    drill_down=False,
+):
+    """
+    Runs as a Plotly on_select callback.
+
+    IMPORTANT:
+    The chart click is queued first, then applied
+    before sidebar widgets are constructed on rerun.
+    This avoids modifying an already-created widget.
+    """
+    event = st.session_state.get(chart_widget_key)
+    point = _read_selected_point(event)
+
+    if point is None:
+        return
+
+    raw_value = _value_from_point(
+        point, dimension
+    )
+    value = _normalise_selected_value(
+        dimension, raw_value
+    )
+
+    if value is None:
+        return
+
+    if valid_values is not None:
+        allowed = {
+            _normalise_selected_value(
+                dimension, item
+            )
+            for item in valid_values
+        }
+
+        if value not in allowed:
+            return
+
+    st.session_state["_pending_chart_filter"] = {
+        "dimension": dimension,
+        "value": value,
+        "drill_down": bool(drill_down),
+    }
+
+
+def apply_pending_chart_filter():
+    """
+    Apply a chart selection BEFORE rendering the sidebar.
+
+    Both the shared filter dictionary and sidebar widget
+    state are synchronized here.
+    """
+    pending = st.session_state.get(
+        "_pending_chart_filter"
+    )
+
+    if pending is None:
+        return
+
+    st.session_state["_pending_chart_filter"] = None
+
+    dimension = pending["dimension"]
+    value = pending["value"]
+
+    current = dict(
+        st.session_state.get("filters", {})
+    )
+
+    current[dimension] = value
+
+    # Switching the year should not preserve a quarter
+    # that might not exist in the destination year.
+    if dimension == "year":
+        current["quarter"] = ALL
+
+    st.session_state["filters"] = current
+
+    # Mirror selections into sidebar widget keys.
+    sidebar_key = SIDEBAR_KEYS.get(dimension)
+
+    if sidebar_key is not None:
+        st.session_state[sidebar_key] = value
+
+    if dimension == "year":
+        quarter_key = SIDEBAR_KEYS.get("quarter")
+        if quarter_key is not None:
+            st.session_state[quarter_key] = ALL
+
+    # The clicked year both filters the dashboard
+    # AND switches the trend to quarterly mode.
+    if dimension == "year" and pending["drill_down"]:
+        st.session_state["trend_drill_year"] = value
+
+    # A fresh chart key clears stale Plotly selections.
+    st.session_state["crossfilter_version"] += 1
+
+
+def reset_trend_view():
+    """
+    Return the trend to annual view.
+    KEEP the currently selected global year.
+    """
+    st.session_state["trend_drill_year"] = None
+    st.session_state["trend_view_version"] += 1
+    st.session_state["crossfilter_version"] += 1
+
+
+def reset_dashboard_view():
+    """
+    Reset the chart drill-down and sidebar filters together.
+    """
+    reset_all_filters()
+    st.session_state["trend_drill_year"] = None
+    st.session_state["trend_view_version"] += 1
+    st.session_state["crossfilter_version"] += 1
+    st.session_state["_pending_chart_filter"] = None
+
+
+# Apply any incoming chart click first.
+apply_pending_chart_filter()
+
+
+# ============================================================
+# GENERAL UTILITIES
+# ============================================================
+
+def plot_chart(fig, **kwargs):
+    return st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config=PLOT_CONFIG,
+        **kwargs,
+    )
+
+
+def safe_number(value):
+    try:
+        value = float(value)
+        return (
+            value
+            if np.isfinite(value)
+            else None
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def format_number(value, suffix="", decimals=2):
+    value = safe_number(value)
+
+    if value is None:
+        return "—"
+
+    return f"{value:,.{decimals}f}{suffix}"
+
+
+def filter_frame(frame, metric):
+    if (
+        not isinstance(frame, pd.DataFrame)
+        or frame.empty
+        or metric not in frame.columns
+    ):
+        return pd.DataFrame(
+            columns=["region", metric]
+        )
+
+    result = frame.copy()
+    result[metric] = pd.to_numeric(
+        result[metric],
+        errors="coerce",
+    )
+    return result.dropna(subset=[metric])
+
+
+def render_interactive_chart(
+    figure,
+    title,
+    description,
+    chart_name,
+    dimension=None,
+    valid_values=None,
+    drill_down=False,
+):
+    with st.container(border=True):
+        st.markdown(f"**{title}**")
+
+        if description:
+            st.caption(description)
+
+        if figure is None:
+            st.info("ไม่มีข้อมูลตามตัวกรองที่เลือก")
+            return
+
+        key = (
+            f"cross_{chart_name}_"
+            f"{st.session_state['crossfilter_version']}"
+        )
+
+        if dimension is None:
+            plot_chart(
+                figure,
+                key=key,
+            )
+        else:
+            plot_chart(
+                figure,
+                key=key,
+                on_select=(
+                    lambda k=key,
+                           d=dimension,
+                           v=valid_values,
+                           dr=drill_down:
+                    queue_chart_filter(
+                        k, d, v, dr
+                    )
+                ),
+                selection_mode="points",
+            )
+
+
+def render_kpi(
+    title,
+    value,
+    unit,
+    note,
+    css_class,
+):
+    if unit == "บาท/เดือน":
+        rendered = format_number(
+            value, decimals=0
+        )
+    else:
+        rendered = format_number(value)
+
+    st.markdown(
+        f"""
+        <div class="kpi-card {css_class}">
+            <div class="kpi-title">
+                {html.escape(title)}
+            </div>
+            <div class="kpi-value">
+                {rendered}
+                <span class="kpi-unit">
+                    {html.escape(unit)}
+                </span>
+            </div>
+            <div class="kpi-subtext">
+                {html.escape(note)}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ============================================================
+# MAP HIGHLIGHT
+# ============================================================
+
+def build_map(
+    region_data,
+    metric,
+    selected_year,
+    selected_region,
+):
+    is_selected = (
+        selected_region not in (ALL, None)
+    )
+
+    height = (
+        MAP_SELECTED_HEIGHT
+        if is_selected
+        else MAP_FULL_HEIGHT
+    )
+
+    fig = create_thailand_map(
+        region_data,
+        metric=metric,
+        year=selected_year,
+        selected_region=(
+            selected_region if is_selected else ALL
+        ),
+        height=height,
+    )
+
+    if fig is None:
+        return None
+
+    fig.update_layout(
+        height=height,
+        autosize=False,
+        margin=dict(l=5, r=5, t=5, b=5),
+        clickmode="event+select",
+        dragmode=False,
+    )
+
+    choropleths = [
+        trace
+        for trace in fig.data
+        if trace.type == "choropleth"
+    ]
+
+    if not choropleths:
+        return fig
+
+    trace = choropleths[0]
+
+    if not is_selected:
+        fig.update_geos(
+            fitbounds="locations",
+            visible=False,
+        )
+        return fig
+
+    region_names = list(trace.locations)
+
+    if selected_region not in region_names:
+        return fig
+
+    original_values = dict(
+        zip(region_names, list(trace.z))
+    )
+
+    # Fade every region but keep the selection targets.
+    trace.z = [0] * len(region_names)
+    trace.zmin = 0
+    trace.zmax = 1
+    trace.colorscale = [
+        [0, "#EAE1EA"],
+        [1, "#EAE1EA"],
+    ]
+    trace.showscale = False
+
+    trace.marker.line.color = "#FFFFFF"
+    trace.marker.line.width = 1.2
+
+    selected_value = original_values.get(
+        selected_region
+    )
+
+    fig.add_trace(
+        go.Choropleth(
+            geojson=trace.geojson,
+            locations=[selected_region],
+            z=[1],
+            customdata=[[selected_region]],
+            featureidkey=trace.featureidkey,
+            colorscale=[
+                [0, PINK],
+                [1, PINK],
+            ],
+            zmin=0,
+            zmax=1,
+            showscale=False,
+            marker=dict(
+                line=dict(
+                    color="#552B65",
+                    width=3,
+                )
+            ),
+            hovertemplate=(
+                f"<b>{html.escape(str(selected_region))}</b>"
+                f"<br>{LABELS.get(metric, metric)}: "
+                f"{format_number(selected_value)}"
+                "<extra></extra>"
+            ),
+        )
+    )
+
+    return fig
+
+
+def regional_metric_value(
+    frame,
+    region,
+    candidate_columns,
+):
+    if (
+        not isinstance(frame, pd.DataFrame)
+        or frame.empty
+        or "region" not in frame.columns
+    ):
+        return None
+
+    rows = frame[
+        frame["region"] == region
+    ]
+
+    if rows.empty:
+        return None
+
+    for column in candidate_columns:
+        if column in rows.columns:
+            value = safe_number(
+                rows.iloc[0][column]
+            )
+
+            if value is not None:
+                return value
+
+    return None
+
+
+def render_regional_detail(
+    region,
+    frame,
+    period_label,
+):
+    st.markdown(
+        f"""
+        <div class="region-head">
+            <h3>📍 {html.escape(str(region))}</h3>
+            <div>
+                ข้อมูลตลาดแรงงาน ·
+                {html.escape(str(period_label))}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    details = [
+        (
+            "💵 ค่าจ้างเฉลี่ย",
+            ["avg_wage"],
+            " บาท/เดือน",
+        ),
+        (
+            "📈 อัตราการมีงานทำ",
+            ["emp_rate"],
+            "%",
+        ),
+        (
+            "⚠️ อัตราการว่างงาน",
+            ["unemp_rate"],
+            "%",
+        ),
+        (
+            "👥 จำนวนผู้มีงานทำ",
+            ["headcount_m", "emp_headcount_m"],
+            " ล้านคน",
+        ),
+    ]
+
+    for label, columns, suffix in details:
+        value = regional_metric_value(
+            frame, region, columns
+        )
+
+        st.markdown(
+            f"""
+            <div class="detail-metric">
+                <div class="detail-label">{label}</div>
+                <div class="detail-value">
+                    {format_number(value, suffix)}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+# ============================================================
+# HISTORICAL TREND: KEEP EVERY YEAR AVAILABLE
+# ============================================================
+
+def get_historical_observations(
+    data,
+    filters,
+):
+    """
+    Annual trend always retains all available years
+    from 2561 to 2568.
+
+    Region, age, sex and area are applied.
+    Year and quarter sidebar filters are excluded here.
+
+    This lets users click a different year even while
+    their current global year is already selected.
+    """
+
+    required = [
+        "year",
+        "quarter",
+        "emp_rate",
+        "unemp_rate",
+    ]
+
+    if not set(required).issubset(data.columns):
+        return pd.DataFrame(columns=required)
+
+    frame = data.copy()
+
+    dimensions = {
+        "region": "clean_region",
+        "area": "clean_area",
+        "sex": "clean_sex",
+        "age_group": "clean_age",
+    }
+
+    for dimension, column in dimensions.items():
+        if column not in frame.columns:
+            continue
+
+        value = filters.get(dimension, ALL)
+
+        target = (
+            "รวม"
+            if value in (ALL, "รวม", None)
+            else str(value)
+        )
+
+        if (
+            dimension == "area"
+            and target == "รวม"
+            and filters.get("region") == "กรุงเทพมหานคร"
+        ):
+            target = "ในเขตเทศบาล"
+
+        frame = frame[
+            frame[column].astype(str) == target
+        ]
+
+    frame = frame[required].copy()
+
+    for column in required:
+        frame[column] = pd.to_numeric(
+            frame[column],
+            errors="coerce",
+        )
+
+    frame = frame[
+        frame["year"].between(
+            START_YEAR, END_YEAR
+        )
+        & frame["quarter"].isin([1, 2, 3, 4])
+    ]
+
+    if frame.empty:
+        return pd.DataFrame(columns=required)
+
+    # A unique observation must have a unique rate.
+    # Identical duplicate records do not change the value.
+    rows = []
+
+    for (year, quarter), group in frame.groupby(
+        ["year", "quarter"],
+        sort=True,
+    ):
+        row = {
+            "year": int(year),
+            "quarter": int(quarter),
+        }
+
+        for metric in [
+            "emp_rate",
+            "unemp_rate",
+        ]:
+            values = group[metric].dropna().unique()
+
+            row[metric] = (
+                float(values[0])
+                if len(values) == 1
+                else np.nan
+            )
+
+        if (
+            pd.notna(row["emp_rate"])
+            or pd.notna(row["unemp_rate"])
+        ):
+            rows.append(row)
+
+    if not rows:
+        return pd.DataFrame(columns=required)
+
+    return pd.DataFrame(rows).sort_values(
+        ["year", "quarter"]
+    )
+
+
+def build_historical_trend(
+    observations,
+    selected_year=None,
+):
+    """
+    If selected_year is None:
+        Show every year.
+
+    Otherwise:
+        Show Q1-Q4 of selected_year.
+
+    The global filter is updated by the chart callback.
+    """
+
+    if observations.empty:
+        return None
+
+    quarterly = selected_year is not None
+
+    fig = go.Figure()
+
+    for metric, label, color, axis in [
+        (
+            "emp_rate",
+            "อัตราการมีงานทำ",
+            PINK,
+            "y",
+        ),
+        (
+            "unemp_rate",
+            "อัตราการว่างงาน",
+            PURPLE,
+            "y2",
+        ),
+    ]:
+        frame = observations.dropna(
+            subset=[metric]
+        ).sort_values(["year", "quarter"])
+
+        if quarterly:
+            frame = frame[
+                frame["year"] == int(selected_year)
+            ]
+            x = frame["quarter"].astype(int).tolist()
+        else:
+            frame = frame.drop_duplicates(
+                "year",
+                keep="last",
+            ).sort_values("year")
+            x = frame["year"].astype(int).tolist()
+
+        if frame.empty:
+            continue
+
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=frame[metric].tolist(),
+                customdata=[
+                    [int(value)] for value in x
+                ],
+                mode="lines+markers",
+                name=label,
+                yaxis=axis,
+                line=dict(
+                    color=color,
+                    width=3,
+                    dash=(
+                        "dot"
+                        if metric == "unemp_rate"
+                        else "solid"
+                    ),
+                ),
+                marker=dict(
+                    size=11,
+                    color=color,
+                    line=dict(
+                        color="white",
+                        width=1,
+                    ),
+                ),
+                hovertemplate=(
+                    "<b>%{x}</b>"
+                    "<br>" + label
+                    + ": %{y:.2f}%"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    if not fig.data:
+        return None
+
+    if quarterly:
+        ticks = [1, 2, 3, 4]
+        labels = ["Q1", "Q2", "Q3", "Q4"]
+        x_title = f"ไตรมาส ปี พ.ศ. {selected_year}"
+    else:
+        ticks = list(range(
+            START_YEAR,
+            END_YEAR + 1,
+        ))
+        labels = [str(v) for v in ticks]
+        x_title = "ปี พ.ศ."
+
+    fig.update_layout(
+        height=390,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(
+            family="Kanit, sans-serif",
+            color=DARK,
+        ),
+        margin=dict(
+            l=60,
+            r=65,
+            t=70,
+            b=55,
+        ),
+        clickmode="event+select",
+        dragmode=False,
+        hovermode="x unified",
+        legend=dict(
+            orientation="h",
+            x=0.5,
+            xanchor="center",
+            y=1.12,
+            yanchor="bottom",
+        ),
+        xaxis=dict(
+            title=x_title,
+            type="linear",
+            tickmode="array",
+            tickvals=ticks,
+            ticktext=labels,
+            gridcolor=GRID,
+        ),
+        yaxis=dict(
+            title="อัตราการมีงานทำ (%)",
+            gridcolor=GRID,
+            tickfont=dict(color=PINK),
+        ),
+        yaxis2=dict(
+            title="อัตราการว่างงาน (%)",
+            overlaying="y",
+            side="right",
+            showgrid=False,
+            tickfont=dict(color=PURPLE),
+        ),
+    )
+
+    return fig
+
+
+# ============================================================
+# AGE UNEMPLOYMENT PRESENTATION
+# ============================================================
+
+def prepare_age_chart(
+    age_data,
+    selected_age=None,
+):
+    figure = create_youth_unemployment_chart(
+        age_data,
+        selected_age=selected_age,
+    )
+
+    if figure is None:
+        return None, None
+
+    # Remove overlapping insight annotations.
+    figure.update_layout(
+        annotations=[],
+        height=430,
+        margin=dict(
+            l=110, r=65, t=20, b=55
+        ),
+    )
+
+    summary = None
+
+    if (
+        isinstance(age_data, pd.DataFrame)
+        and not age_data.empty
+        and {"age_group", "unemp_rate"}
+        .issubset(age_data.columns)
+    ):
+        candidates = []
+
+        for age, group in age_data.groupby(
+            "age_group"
+        ):
+            unique = pd.to_numeric(
+                group["unemp_rate"],
+                errors="coerce",
+            ).dropna().unique()
+
+            if len(unique) == 1:
+                candidates.append(
+                    (str(age), float(unique[0]))
+                )
+
+        if candidates:
+            summary = max(
+                candidates,
+                key=lambda item: item[1],
+            )
+
+    return figure, summary
+
+
+# ============================================================
+# LOAD DATA / YEAR SCOPE
+# ============================================================
+
 try:
-    df = get_cached_labor_data()
-except Exception as e:
-    st.error(f"❌ เกิดข้อผิดพลาดในการโหลดข้อมูล: {e}")
+    raw_df = get_cached_labor_data()
+except Exception as error:
+    st.error(f"โหลดข้อมูลไม่สำเร็จ: {error}")
     st.stop()
 
+# Work with a scoped copy only.
+# The original CSV remains unchanged.
+df = raw_df[
+    pd.to_numeric(
+        raw_df["year"],
+        errors="coerce",
+    ).between(
+        START_YEAR,
+        END_YEAR,
+    )
+].copy()
 
-# -------------------------------------------------------------
-# SIDEBAR CONTROLS
-# -------------------------------------------------------------
+if df.empty:
+    st.error(
+        "ไม่พบข้อมูลระหว่างปี 2561–2568"
+    )
+    st.stop()
+
+# Restore a valid year if an older session
+# retained a value outside the permitted scope.
+valid_years = sorted(
+    pd.to_numeric(
+        df["year"],
+        errors="coerce",
+    ).dropna().astype(int).unique().tolist(),
+    reverse=True,
+)
+
+current_filter_state = dict(
+    st.session_state.get("filters", {})
+)
+
+current_year = current_filter_state.get("year")
+
+if current_year not in valid_years:
+    current_filter_state["year"] = valid_years[0]
+
+    st.session_state["filters"] = (
+        current_filter_state
+    )
+
+    sidebar_year_key = SIDEBAR_KEYS.get("year")
+
+    if sidebar_year_key is not None:
+        st.session_state[
+            sidebar_year_key
+        ] = valid_years[0]
+
+sanitize_filters(df)
+
+filters = dict(get_current_filters())
+
+selected_year = int(filters["year"])
+selected_region = filters["region"]
+
+region_selected = selected_region not in (
+    ALL, None
+)
+
+available_regions = get_regions_for_year(
+    df,
+    selected_year,
+)
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
 with st.sidebar:
-    st.markdown("""
-    <div class="sidebar-brand-card">
-        <h2>🇹🇭 Labor Analytics</h2>
-        <p>สถิติตลาดแรงงานไทย (NSO Thailand)</p>
-    </div>
-    """, unsafe_allow_html=True)
 
-    st.markdown("### 🔍 ตัวกรองข้อมูลหลัก (Global Filters)")
+    st.markdown(
+        """
+        <div class="sidebar-brand-card">
+            <h2>🇹🇭 Labor Analytics</h2>
+            <p>สถิติตลาดแรงงานไทย (NSO Thailand)</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    # 1. Year Filter
-    avail_years = sorted(df['year'].unique(), reverse=True)
-    cur_year = filters.get('year', 2568)
-    year_idx = avail_years.index(cur_year) if cur_year in avail_years else 0
-    selected_year = st.selectbox(
+    st.markdown("### 🔍 ตัวกรองข้อมูลหลัก")
+
+    st.selectbox(
         "📅 ปี พ.ศ.",
-        options=avail_years,
-        index=year_idx,
-        key="sb_year"
+        options=valid_years,
+        key=SIDEBAR_KEYS["year"],
+        on_change=on_sidebar_change,
+        args=("year",),
     )
-    if selected_year != filters.get('year'):
-        set_filter('year', selected_year)
-        st.rerun()
 
-    # 2. Quarter Filter
-    q_opts = ['ทั้งหมด', 1, 2, 3, 4]
-    cur_q = filters.get('quarter', 'ทั้งหมด')
-    q_idx = q_opts.index(cur_q) if cur_q in q_opts else 0
-    selected_quarter = st.selectbox(
+    st.selectbox(
         "⏱️ ไตรมาส",
-        options=q_opts,
-        index=q_idx,
-        format_func=lambda x: f"ไตรมาส {x}" if isinstance(x, int) else "ทั้งหมด (ภาพรวม)",
-        key="sb_quarter"
+        options=[
+            ALL,
+            *get_quarters_for_year(
+                df, selected_year
+            ),
+        ],
+        key=SIDEBAR_KEYS["quarter"],
+        on_change=on_sidebar_change,
+        args=("quarter",),
+        format_func=lambda value: (
+            f"ไตรมาส {value}"
+            if isinstance(value, (int, np.integer))
+            else "ทั้งหมด (ภาพรวม)"
+        ),
     )
-    if selected_quarter != filters.get('quarter'):
-        set_filter('quarter', selected_quarter)
-        st.rerun()
 
-    # 3. Region Filter
-    avail_regions = ['ทั้งหมด'] + [r for r in REGION_ORDER if r in df['clean_region'].unique() and r != 'รวม']
-    cur_region = filters.get('region', 'ทั้งหมด')
-    reg_idx = avail_regions.index(cur_region) if cur_region in avail_regions else 0
-    selected_region = st.selectbox(
+    st.selectbox(
         "📍 ภูมิภาค",
-        options=avail_regions,
-        index=reg_idx,
-        key="sb_region"
+        options=[ALL, *available_regions],
+        key=SIDEBAR_KEYS["region"],
+        on_change=on_sidebar_change,
+        args=("region",),
     )
-    if selected_region != filters.get('region'):
-        set_filter('region', selected_region)
-        st.rerun()
 
-    # 4. Area Filter
-    avail_areas = ['ทั้งหมด', 'ในเขตเทศบาล', 'นอกเขตเทศบาล']
-    cur_area = filters.get('area', 'ทั้งหมด')
-    area_idx = avail_areas.index(cur_area) if cur_area in avail_areas else 0
-    selected_area = st.selectbox(
+    st.selectbox(
         "🏙️ เขตการปกครอง",
-        options=avail_areas,
-        index=area_idx,
-        key="sb_area"
+        options=[
+            ALL,
+            "ในเขตเทศบาล",
+            "นอกเขตเทศบาล",
+        ],
+        key=SIDEBAR_KEYS["area"],
+        on_change=on_sidebar_change,
+        args=("area",),
     )
-    if selected_area != filters.get('area'):
-        set_filter('area', selected_area)
-        st.rerun()
 
-    # 5. Sex Filter
-    avail_sex = ['ทั้งหมด', 'ชาย', 'หญิง']
-    cur_sex = filters.get('sex', 'ทั้งหมด')
-    sex_idx = avail_sex.index(cur_sex) if cur_sex in avail_sex else 0
-    selected_sex = st.selectbox(
+    st.selectbox(
         "👤 เพศ",
-        options=avail_sex,
-        index=sex_idx,
-        key="sb_sex"
+        options=[
+            ALL,
+            "ชาย",
+            "หญิง",
+        ],
+        key=SIDEBAR_KEYS["sex"],
+        on_change=on_sidebar_change,
+        args=("sex",),
     )
-    if selected_sex != filters.get('sex'):
-        set_filter('sex', selected_sex)
-        st.rerun()
 
-    # 6. Age Group Filter
-    avail_ages = ['ทั้งหมด'] + [a for a in AGE_ORDER if a != 'รวม']
-    cur_age = filters.get('age_group', 'ทั้งหมด')
-    age_idx = avail_ages.index(cur_age) if cur_age in avail_ages else 0
-    selected_age = st.selectbox(
+    st.selectbox(
         "🎂 กลุ่มอายุ",
-        options=avail_ages,
-        index=age_idx,
-        key="sb_age"
+        options=[
+            ALL,
+            *[
+                age
+                for age in AGE_ORDER
+                if age != "รวม"
+            ],
+        ],
+        key=SIDEBAR_KEYS["age_group"],
+        on_change=on_sidebar_change,
+        args=("age_group",),
     )
-    if selected_age != filters.get('age_group'):
-        set_filter('age_group', selected_age)
-        st.rerun()
-
-    st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("🔄 รีเซ็ตตัวกรองทั้งหมด", type="primary", use_container_width=True):
-        reset_all_filters()
-        st.session_state['_pending_reset_sidebar_sync'] = True
-        st.rerun()
 
     st.markdown("---")
-    st.markdown("""
-    <div style="font-size: 0.8rem; color: #7A6882; line-height: 1.4;">
-        <b>แหล่งข้อมูล:</b> การสำรวจภาวะการทำงานของประชากร สำนักงานสถิติแห่งชาติ (NSO)<br>
-        <b>เทคโนโลยี:</b> Python, Streamlit, Pandas, Plotly<br>
-        <b>เวอร์ชัน:</b> 1.0.0
+
+    st.button(
+        "🔄 รีเซ็ตตัวกรองทั้งหมด",
+        type="primary",
+        use_container_width=True,
+        on_click=reset_dashboard_view,
+    )
+
+    st.caption(
+        "ข้อมูล: สำนักงานสถิติแห่งชาติ (NSO)"
+    )
+
+
+# ============================================================
+# PAGE HEADER
+# ============================================================
+
+st.markdown(
+    """
+    <div class="main-header-banner">
+        <h1 class="main-header-title">
+            🇹🇭 แดชบอร์ดวิเคราะห์ตลาดแรงงานไทย
+        </h1>
+        <p class="main-header-subtitle">
+            วิเคราะห์ตลาดแรงงานไทย ปี พ.ศ. 2561–2568
+        </p>
     </div>
-    """, unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True,
+)
+
+scope = (
+    selected_region
+    if region_selected
+    else "ประเทศไทย"
+)
+
+kpis = get_kpis(
+    df,
+    filters,
+)
+
+period_label = (
+    kpis.get("period_label")
+    or f"ปี พ.ศ. {selected_year}"
+)
+
+# The regional comparison remains complete:
+# changing a region must not hide other choices.
+comparison_filters = dict(filters)
+comparison_filters["region"] = ALL
+
+all_region_data = get_regional_comparison_data(
+    df,
+    comparison_filters,
+)
+
+# The actual selected filter combination.
+selected_region_data = (
+    get_regional_comparison_data(
+        df,
+        filters,
+    )
+)
 
 
-# -------------------------------------------------------------
-# MAIN DASHBOARD AREA
-# -------------------------------------------------------------
+# ============================================================
+# TABS
+# ============================================================
 
-# Main Header Banner
-st.markdown("""
-<div class="main-header-banner">
-    <div>
-        <h1 class="main-header-title">🇹🇭 แดชบอร์ดวิเคราะห์สถิติตลาดแรงงานไทย</h1>
-        <p class="main-header-subtitle">ระบบติดตามภาวะการทำงาน ค่าจ้าง อัตราการว่างงาน และโครงสร้างประชากรแบบโต้ตอบ (Cross-filtering Enabled)</p>
-    </div>
-</div>
-""", unsafe_allow_html=True)
-
-# Active Filters Tag Bar
-active_tags_html = ['<div class="active-filters-container"><span style="font-size:0.85rem; font-weight:600; color:#43334C;">ตัวกรองที่ใช้งาน:</span>']
-has_custom_filters = False
-
-for dim, val in filters.items():
-    if dim == 'year':
-        active_tags_html.append(f'<span class="filter-pill"><span class="filter-pill-label">ปี:</span> <span class="filter-pill-val">{val}</span></span>')
-    elif val != 'ทั้งหมด':
-        has_custom_filters = True
-        label_map = {'quarter': 'ไตรมาส', 'region': 'ภาค', 'area': 'พื้นที่', 'sex': 'เพศ', 'age_group': 'อายุ'}
-        d_lbl = label_map.get(dim, dim)
-        active_tags_html.append(f'<span class="filter-pill"><span class="filter-pill-label">{d_lbl}:</span> <span class="filter-pill-val">{val}</span></span>')
-
-active_tags_html.append('</div>')
-st.markdown("".join(active_tags_html), unsafe_allow_html=True)
-
-# Calculate KPIs
-kpis = get_kpis(df, filters)
-
-# Display caveats if applicable
-caveats = []
-if kpis['wage_caveat']:
-    caveats.append(kpis['wage_caveat'])
-if kpis['headcount_caveat']:
-    caveats.append(kpis['headcount_caveat'])
-
-if caveats:
-    caveat_text = "<br>• ".join(["• " + c for c in caveats])
-    st.markdown(f"""
-    <div class="caveat-banner">
-        <div class="caveat-title">ℹ️ ข้อควรทราบทางสถิติสำหรับตัวกรองปัจจุบัน:</div>
-        {caveat_text}
-    </div>
-    """, unsafe_allow_html=True)
-
-st.markdown("<br>", unsafe_allow_html=True)
-
-# Show only KPI cards backed by actual values for the active filters.
-# Create columns dynamically, so absent indicators leave no blank placeholders.
-def valid_metric(value):
-    try:
-        return value is not None and bool(np.isfinite(float(value)))
-    except (TypeError, ValueError):
-        return False
-
-kpi_items = [
-    ('avg_wage', '💵 ค่าจ้างเฉลี่ย', 'บาท/เดือน', 'ประชากรมีงานทำที่เป็นลูกจ้าง', 'kpi-card-1', ',.0f'),
-    ('emp_rate', '📈 อัตราการมีงานทำ', '%', 'สัดส่วนต่อกำลังแรงงานรวม', 'kpi-card-2', '.2f'),
-    ('unemp_rate', '⚠️ อัตราการว่างงาน', '%', 'สัดส่วนผู้ว่างงานต่อกำลังแรงงาน', 'kpi-card-3', '.2f'),
-    ('emp_headcount_m', '👥 ประชากรผู้มีงานทำ', 'ล้านคน', '', 'kpi-card-4', '.2f'),
-]
-available_kpis = [item for item in kpi_items if valid_metric(kpis.get(item[0]))]
-if available_kpis:
-    for col, (metric, title, unit, note, color_class, num_format) in zip(
-        st.columns(len(available_kpis)), available_kpis
-    ):
-        with col:
-            value_text = format(float(kpis[metric]), num_format)
-            if metric == 'emp_headcount_m' and valid_metric(kpis.get('emp_headcount_k')):
-                note = f"({float(kpis['emp_headcount_k']):,.1f} พันคน)"
-            st.markdown(f"""
-            <div class="kpi-card {color_class}">
-                <div class="kpi-title">{title}</div>
-                <div class="kpi-value">{value_text}<span class="kpi-unit">{unit}</span></div>
-                <div class="kpi-subtext">{note}</div>
-            </div>
-            """, unsafe_allow_html=True)
-else:
-    st.caption('ไม่มีตัวชี้วัด KPI ที่รองรับตัวกรองนี้')
-
-st.markdown("<br>", unsafe_allow_html=True)
-
-
-# -------------------------------------------------------------
-# TAB NAVIGATION
-# -------------------------------------------------------------
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3 = st.tabs([
     "📊 ภาพรวมตลาดแรงงานไทย",
-    "🗺️ วิเคราะห์ตลาดแรงงานรายภูมิภาค",
-    "👥 วิเคราะห์กลุ่มประชากรและความแตกต่าง",
-    "📋 ตารางข้อมูลและคำอธิบายสถิติ"
+    "🗺️ เปรียบเทียบภูมิภาค",
+    "👥 วิเคราะห์กลุ่มแรงงาน",
 ])
 
 
-# -------------------------------------------------------------
-# TAB 1: ภาพรวมตลาดแรงงานไทย (MACRO OVERVIEW)
-# -------------------------------------------------------------
+# ============================================================
+# TAB 1 - OVERVIEW
+# ============================================================
+
 with tab1:
-    # Map is the main interaction point of the overview.
-    st.markdown("### 🗺️ สำรวจตลาดแรงงานรายภูมิภาค")
-    full_region_data = get_regional_comparison_data(df, filters)
-    map_metric = st.selectbox(
-        'เลือกตัวชี้วัดบนแผนที่',
-        ['emp_rate', 'unemp_rate', 'avg_wage'],
-        format_func=lambda x: {
-            'emp_rate': 'อัตราการมีงานทำ (%)',
-            'unemp_rate': 'อัตราการว่างงาน (%)',
-            'avg_wage': 'ค่าจ้างเฉลี่ย (บาท/เดือน)',
-        }[x],
-        key='overview_map_metric',
+
+    st.caption(
+        f"📍 {scope} · {period_label}"
     )
-    valid_regions = full_region_data.dropna(subset=[map_metric]).copy()
-    if not valid_regions.empty:
-        main_map, map_detail = st.columns([2.4, 1], gap='medium')
-        with main_map:
-            with st.container(border=True):
-                selected_region = filters.get('region', 'ทั้งหมด')
-                if selected_region != 'ทั้งหมด':
-                    st.caption(f'📍 เลือกอยู่: {selected_region} — แผนที่ขยายเพื่อแสดงภูมิภาคนี้')
-                map_fig = create_thailand_map(
-                    valid_regions, metric=map_metric, year=filters['year'],
-                    selected_region=selected_region,
-                )
-                if plotly_events is not None:
-                    # IMPORTANT: exactly one map trace; pointNumber indexes trace.locations.
-                    clicked = plotly_events(
-                        map_fig, click_event=True, select_event=False,
-                        hover_event=False, override_height=650,
-                        key=f"regional_map_click_{filters['year']}_{selected_region}_{map_metric}",
-                    )
-                    if clicked:
-                        point = clicked[0]
-                        names = list(map_fig.data[0].locations) if map_fig.data else []
-                        position = point.get('pointNumber', point.get('pointIndex'))
-                        candidate = names[position] if isinstance(position, int) and 0 <= position < len(names) else None
-                        if candidate and candidate != selected_region:
-                            set_filter('region', candidate)
-                            st.session_state['_pending_map_sidebar_sync'] = True
-                            st.rerun()
-                else:
-                    st.plotly_chart(map_fig, use_container_width=True,
-                                    config={'displayModeBar': False})
-                    st.info('ติดตั้ง streamlit-plotly-events เพื่อเปิดการคลิกแผนที่: python -m pip install -r requirements.txt')
-        with map_detail:
-            with st.container(border=True):
-                st.markdown('**📌 รายละเอียดภูมิภาค**')
-                if filters['region'] != 'ทั้งหมด':
-                    st.markdown(f"### {filters['region']}")
-                    if st.button('↩️ กลับไปดูทั้งประเทศ', key='overview_map_reset',
-                                 use_container_width=True):
-                        clear_filter('region')
-                        st.session_state['_pending_map_sidebar_sync'] = True
-                        st.rerun()
-                    regional_kpis = get_kpis(df, filters)
-                    for field, label, unit in [
-                        ('emp_rate', 'อัตราการมีงานทำ', '%'),
-                        ('unemp_rate', 'อัตราการว่างงาน', '%'),
-                        ('avg_wage', 'ค่าจ้างเฉลี่ย', 'บาท/เดือน'),
-                    ]:
-                        value = regional_kpis.get(field)
-                        if valid_metric(value):
-                            st.metric(label, f'{float(value):,.2f} {unit}')
-                else:
-                    st.markdown('**ประเทศไทย**')
-                    st.caption('คลิกภูมิภาคบนแผนที่ หรือกดชื่อภาคด้านล่าง เพื่อซูมและกรองทั้ง Dashboard')
-                # Dependable alternative to map clicks for all browsers and devices.
-                st.markdown('**เลือกภาค:**')
-                for region in valid_regions['region'].astype(str).tolist():
-                    if st.button('📍 ' + region, key='map_region_btn_' + region,
-                                 use_container_width=True):
-                        set_filter('region', region)
-                        st.session_state['_pending_map_sidebar_sync'] = True
-                        st.rerun()
+
+    # --------------------------------------------------------
+    # KPI
+    # --------------------------------------------------------
+
+    kpi_definitions = [
+        (
+            "💵 ค่าจ้างเฉลี่ย",
+            kpis.get("avg_wage"),
+            "บาท/เดือน",
+            "ผู้มีงานทำที่เป็นลูกจ้าง",
+            "kpi-card-1",
+        ),
+        (
+            "📈 อัตราการมีงานทำ",
+            kpis.get("emp_rate"),
+            "%",
+            "ข้อมูลตามนิยาม NSO",
+            "kpi-card-2",
+        ),
+        (
+            "⚠️ อัตราการว่างงาน",
+            kpis.get("unemp_rate"),
+            "%",
+            "ผู้ว่างงานต่อกำลังแรงงาน",
+            "kpi-card-3",
+        ),
+        (
+            "👥 จำนวนผู้มีงานทำ",
+            kpis.get("emp_headcount_m"),
+            "ล้านคน",
+            "หน่วยล้านคน",
+            "kpi-card-4",
+        ),
+    ]
+
+    for column, item in zip(
+        st.columns(4),
+        kpi_definitions,
+    ):
+        with column:
+            render_kpi(*item)
+
+    # --------------------------------------------------------
+    # MAP
+    # --------------------------------------------------------
+
+    st.markdown(
+        '<div class="dashboard-section-title">'
+        '🗺️ สำรวจตลาดแรงงานรายภูมิภาค'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    map_metric = st.radio(
+        "ตัวชี้วัดบนแผนที่",
+        options=[
+            "emp_rate",
+            "unemp_rate",
+            "avg_wage",
+        ],
+        format_func=lambda value: LABELS[value],
+        horizontal=True,
+        key="overview_map_metric",
+    )
+
+    map_frame = filter_frame(
+        all_region_data,
+        map_metric,
+    )
+
+    map_regions = (
+        map_frame["region"].astype(str).tolist()
+        if not map_frame.empty
+        else []
+    )
+
+    if region_selected:
+        st.markdown(
+            '<div class="filter-banner">'
+            '📍 กำลังดูข้อมูล: '
+            + html.escape(str(selected_region))
+            + ' · แผนที่และกราฟอื่นใช้ตัวกรองเดียวกัน'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+        st.button(
+            "↩️ กลับไปดูทั้งประเทศ",
+            key="map_reset_region",
+            on_click=clear_filter,
+            args=("region",),
+        )
+
+        map_col, detail_col = st.columns(
+            [1.1, 0.9],
+            gap="medium",
+        )
+
     else:
-        st.caption('ไม่มีข้อมูลรายภาคที่รองรับตัวชี้วัดและช่วงเวลาที่เลือก')
+        map_col = st.container()
+        detail_col = None
 
-    ts_data, wage_data = get_time_series_data(df, filters)
+    with map_col:
 
-    if valid_metric(kpis.get('emp_rate')) or valid_metric(kpis.get('unemp_rate')):
         with st.container(border=True):
-            st.markdown("**📈 แนวโน้มอัตราการมีงานทำและอัตราการว่างงานตามเวลา**")
-            st.caption("แสดงการเคลื่อนไหวของตลาดแรงงานรายปีและรายไตรมาส (คลิกเลือกจุดบนกราฟเพื่อกรองปี/ไตรมาส)")
-
-            fig_rates_ts = create_time_series_chart(ts_data)
-            event_rates = st.plotly_chart(
-                fig_rates_ts,
-                use_container_width=True,
-                on_select="rerun",
-                selection_mode="points",
-                key="chart_rates_ts"
+            st.markdown(
+                "**🗺️ แผนที่ประเทศไทย**"
             )
-            if handle_chart_selection(event_rates, 'year', value_key='customdata'):
-                st.rerun()
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-        if valid_metric(kpis.get('avg_wage')):
-            with st.container(border=True):
-                st.markdown("**💵 ทิศทางการเติบโตของค่าจ้างเฉลี่ย (บาท/เดือน)**")
-                st.caption("ค่าจ้างเฉลี่ยรายปีตามตัวกรองที่เลือก (คลิกจุดปีบนกราฟเพื่อเจาะจงปี)")
-                fig_wage_trend = create_wage_trend_chart(ts_data, wage_data)
-                event_wage = st.plotly_chart(
-                    fig_wage_trend,
-                    use_container_width=True,
-                    on_select="rerun",
-                    selection_mode="points",
-                    key="chart_wage_trend"
-                )
-                if handle_chart_selection(event_wage, 'year', value_key='customdata'):
-                    st.rerun()
-
-    with c2:
-        if valid_metric(kpis.get('unemp_rate')) and filters.get('quarter', 'ทั้งหมด') == 'ทั้งหมด':
-            with st.container(border=True):
-                st.markdown("**🌾 การเปลี่ยนแปลงตามฤดูกาลในแต่ละไตรมาส (Seasonality)**")
-                st.caption("เปรียบเทียบอัตราว่างงานเฉลี่ย Q1 (แล้ง) ถึง Q4 (เก็บเกี่ยว) ชี้ชัดผลกระทบภาคเกษตรกรรม")
-                fig_season = create_seasonality_chart(df, filters)
-                event_season = st.plotly_chart(
-                    fig_season,
-                    use_container_width=True,
-                    on_select="rerun",
-                    selection_mode="points",
-                    key="chart_seasonality"
-                )
-                if handle_chart_selection(event_season, 'quarter', value_key='customdata'):
-                    st.rerun()
-
-    if valid_metric(kpis.get('emp_headcount_m')):
-        with st.container(border=True):
-            st.markdown("**👥 จำนวนผู้มีงานทำรวมของประเทศตามช่วงเวลา (ล้านคน)**")
-            st.caption("สะท้อนขนาดกำลังแรงงานที่แท้จริงจากประมาณการประชากร (2555 - 2569)")
-            fig_hc_trend = create_headcount_trend_chart(ts_data)
-            event_hc = st.plotly_chart(
-                fig_hc_trend,
-                use_container_width=True,
-                on_select="rerun",
-                selection_mode="points",
-                key="chart_hc_trend"
+            st.caption(
+                "คลิกภูมิภาคเพื่อกรองข้อมูลทุกแท็บ"
             )
-            if handle_chart_selection(event_hc, 'year', value_key='customdata'):
-                st.rerun()
 
+            map_fig = build_map(
+                map_frame,
+                map_metric,
+                selected_year,
+                selected_region,
+            )
 
-# -------------------------------------------------------------
-# TAB 2: วิเคราะห์ตลาดแรงงานรายภูมิภาค (REGIONAL DEEP-DIVE)
-# -------------------------------------------------------------
-with tab2:
-    reg_data = get_regional_comparison_data(df, filters)
-    area_data = get_area_wage_comparison_data(df, filters)
-
-    # Map lives in Tab 1. Tab 2 keeps regional comparisons.
-    map_metric = st.session_state.get('overview_map_metric', 'emp_rate')
-    col_rank = st.container()
-
-    with col_rank:
-        if valid_metric(kpis.get(map_metric)) and not reg_data.empty:
-            with st.container(border=True):
-                st.markdown("**🏆 การจัดอันดับภูมิภาค (Regional Ranking)**")
-                st.caption("เปรียบเทียบค่าชี้วัดรายภาค (คลิกที่แท่งภูมิภาคเพื่อกรองข้อมูลเฉพาะภาคนั้น)")
-                fig_reg_rank = create_regional_ranking_chart(
-                    reg_data,
-                    metric=map_metric,
-                    selected_region=filters.get('region') if filters.get('region') != 'ทั้งหมด' else None
+            if map_fig is None:
+                st.info(
+                    "ไม่สามารถแสดงแผนที่ได้"
                 )
-                event_rank = st.plotly_chart(
-                    fig_reg_rank,
-                    use_container_width=True,
-                    on_select="rerun",
+            else:
+                map_key = (
+                    "global_map_"
+                    f"{st.session_state['crossfilter_version']}"
+                )
+
+                plot_chart(
+                    map_fig,
+                    key=map_key,
+                    on_select=(
+                        lambda k=map_key,
+                               v=map_regions:
+                        queue_chart_filter(
+                            k,
+                            "region",
+                            v,
+                        )
+                    ),
                     selection_mode="points",
-                    key="chart_regional_rank"
                 )
-                if handle_chart_selection(event_rank, 'region', value_key='customdata'):
-                    st.session_state['_pending_map_sidebar_sync'] = True
-                    st.rerun()
 
-    c_scat, c_dumb = st.columns(2)
+    if detail_col is not None:
 
-    with c_scat:
-        if valid_metric(kpis.get('avg_wage')) and valid_metric(kpis.get('emp_rate')) and not reg_data.empty:
+        with detail_col:
             with st.container(border=True):
-                st.markdown("**⚖️ ค่าจ้างเฉลี่ย vs อัตราการมีงานทำ (Scatter Bubble)**")
-                st.caption("ความสัมพันธ์ระหว่างระดับค่าจ้างและอัตรามีงานทำ (ขนาดฟอง = ประชากรทำงาน)")
-                fig_scatter = create_wage_vs_employment_scatter(reg_data)
-                event_scat = st.plotly_chart(
-                    fig_scatter,
+                render_regional_detail(
+                    selected_region,
+                    all_region_data,
+                    period_label,
+                )
+
+                st.button(
+                    "✕ ปิดรายละเอียด",
+                    key="close_region_panel",
                     use_container_width=True,
-                    on_select="rerun",
-                    selection_mode="points",
-                    key="chart_wage_scatter"
+                    on_click=clear_filter,
+                    args=("region",),
                 )
-                if handle_chart_selection(event_scat, 'region', value_key='customdata'):
-                    st.session_state['_pending_map_sidebar_sync'] = True
-                    st.rerun()
 
-    with c_dumb:
-        if valid_metric(kpis.get('avg_wage')) and not area_data.empty:
-            with st.container(border=True):
-                st.markdown("**🏙️ ช่องว่างค่าจ้างเมือง vs ชนบท (Dumbbell Chart)**")
-                st.caption("เปรียบเทียบค่าจ้างในเขตเทศบาลเทียบกับนอกเขตเทศบาลในแต่ละภาค")
-                fig_dumb = create_dumbbell_wage_chart(area_data)
-                event_dumb = st.plotly_chart(
-                    fig_dumb,
-                    use_container_width=True,
-                    on_select="rerun",
-                    selection_mode="points",
-                    key="chart_area_dumbbell"
-                )
-                if handle_chart_selection(event_dumb, 'region', value_key='customdata'):
-                    st.session_state['_pending_map_sidebar_sync'] = True
-                    st.rerun()
+    # --------------------------------------------------------
+    # YEARLY TREND / GLOBAL FILTER DRILL-DOWN
+    # --------------------------------------------------------
 
-
-# -------------------------------------------------------------
-# TAB 3: วิเคราะห์กลุ่มประชากรและความแตกต่าง (DEMOGRAPHICS)
-# -------------------------------------------------------------
-with tab3:
-    gender_data = get_demographics_gender_data(df, filters)
-    age_data = get_demographics_age_data(df, filters)
-
-    g_col1, g_col2 = st.columns(2)
-
-    with g_col1:
-        if valid_metric(kpis.get('avg_wage')) and not gender_data.empty:
-            with st.container(border=True):
-                st.markdown("**👫 ช่องว่างค่าจ้างระหว่างเพศ (Gender Wage Gap)**")
-                st.caption("เปรียบเทียบค่าจ้างเฉลี่ยชาย vs หญิง (คลิกแท่งเพื่อกรองเฉพาะเพศนั้น)")
-                fig_gender = create_gender_gap_chart(gender_data)
-                event_gender = st.plotly_chart(
-                    fig_gender,
-                    use_container_width=True,
-                    on_select="rerun",
-                    selection_mode="points",
-                    key="chart_gender_gap"
-                )
-                if handle_chart_selection(event_gender, 'sex', value_key='customdata'):
-                    st.rerun()
-
-    with g_col2:
-        if valid_metric(kpis.get('emp_headcount_m')):
-            with st.container(border=True):
-                st.markdown("**📊 โครงสร้างความหนาแน่นแรงงาน (Matrix Heatmap)**")
-                st.caption("การกระจายตัวของจำนวนผู้มีงานทำ (ล้านคน) ตามเพศและช่วงอายุ")
-                fig_heat = create_demographic_matrix_heatmap(df, filters)
-                st.plotly_chart(fig_heat, use_container_width=True, key="chart_demo_heatmap")
-
-    a_col1, a_col2 = st.columns(2)
-
-    with a_col1:
-        if valid_metric(kpis.get('avg_wage')) and not age_data.empty:
-            with st.container(border=True):
-                st.markdown("**📈 โครงสร้างค่าจ้างตามวัย (Age-Wage Curve)**")
-                st.caption("ค่าจ้างเฉลี่ยไต่ระดับตามอายุ และสูงสุดที่วัย 40-59 ปี (คลิกเพื่อกรองช่วงอายุ)")
-                fig_age_wage = create_age_wage_chart(age_data)
-                event_age_wage = st.plotly_chart(
-                    fig_age_wage,
-                    use_container_width=True,
-                    on_select="rerun",
-                    selection_mode="points",
-                    key="chart_age_wage"
-                )
-                if handle_chart_selection(event_age_wage, 'age_group', value_key='customdata'):
-                    st.rerun()
-
-    with a_col2:
-        if valid_metric(kpis.get('unemp_rate')) and not age_data.empty:
-            with st.container(border=True):
-                st.markdown("**🚨 การว่างงานในกลุ่มเยาวชน (Youth Unemployment)**")
-                st.caption("อัตราว่างงานช่วง 15-24 ปี สูงกว่าวัยผู้ใหญ่อย่างมีนัยสำคัญ (คลิกเพื่อกรอง)")
-                fig_youth = create_youth_unemployment_chart(age_data)
-                event_youth = st.plotly_chart(
-                    fig_youth,
-                    use_container_width=True,
-                    on_select="rerun",
-                    selection_mode="points",
-                    key="chart_youth_unemp"
-                )
-                if handle_chart_selection(event_youth, 'age_group', value_key='customdata'):
-                    st.rerun()
-
-
-# -------------------------------------------------------------
-# TAB 4: ตารางข้อมูลและคำอธิบายสถิติ (DATA & NOTES)
-# -------------------------------------------------------------
-with tab4:
-    st.markdown("""
-    <div class="bento-card">
-        <div class="bento-card-title">📋 ตารางสำรวจข้อมูลตลาดแรงงาน (Data Explorer)</div>
-        <div class="bento-card-subtitle">แสดงข้อมูลที่สอดคล้องกับตัวกรองที่กำลังใช้งาน พร้อมตัวเลือกค้นหาและส่งออกเป็น CSV</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # Filter df for table view
-    tbl_mask = pd.Series(True, index=df.index)
-    if filters.get('year') != 'ทั้งหมด':
-        tbl_mask = tbl_mask & (df['year'] == int(filters['year']))
-    if filters.get('quarter') != 'ทั้งหมด' and int(filters['quarter']) > 0:
-        tbl_mask = tbl_mask & (df['quarter'] == int(filters['quarter']))
-    if filters.get('region') != 'ทั้งหมด':
-        tbl_mask = tbl_mask & (df['clean_region'] == filters['region'])
-    if filters.get('area') != 'ทั้งหมด':
-        tbl_mask = tbl_mask & (df['clean_area'] == filters['area'])
-    if filters.get('sex') != 'ทั้งหมด':
-        tbl_mask = tbl_mask & (df['clean_sex'] == filters['sex'])
-    if filters.get('age_group') != 'ทั้งหมด':
-        tbl_mask = tbl_mask & (df['clean_age'] == filters['age_group'])
-
-    tbl_display = df[tbl_mask][[
-        'year', 'quarter', 'clean_region', 'clean_area', 'clean_sex', 'clean_age',
-        'avg_wage', 'emp_rate', 'unemp_rate', 'emp_headcount'
-    ]].copy()
-
-    tbl_display.rename(columns={
-        'year': 'ปี พ.ศ.',
-        'quarter': 'ไตรมาส',
-        'clean_region': 'ภูมิภาค',
-        'clean_area': 'เขตการปกครอง',
-        'clean_sex': 'เพศ',
-        'clean_age': 'กลุ่มอายุ',
-        'avg_wage': 'ค่าจ้างเฉลี่ย (บาท)',
-        'emp_rate': 'อัตราการมีงานทำ (%)',
-        'unemp_rate': 'อัตราการว่างงาน (%)',
-        'emp_headcount': 'ผู้มีงานทำ (พันคน)'
-    }, inplace=True)
-
-    st.write(f"พบข้อมูลทั้งหมด: **{len(tbl_display):,} แถว**")
-    st.dataframe(tbl_display.head(500), use_container_width=True)
-
-    csv_data = tbl_display.to_csv(index=False).encode('utf-8-sig')
-    st.download_button(
-        label="📥 ดาวน์โหลดข้อมูลชุดนี้เป็น CSV",
-        data=csv_data,
-        file_name=f"labor_data_{filters.get('year')}.csv",
-        mime="text/csv"
+    st.markdown(
+        '<div class="dashboard-section-title">'
+        '📈 แนวโน้มตลาดแรงงาน'
+        '</div>',
+        unsafe_allow_html=True,
     )
 
-    st.markdown("---")
-    st.markdown("""
-    ### 📖 คำนิยามและข้อจำกัดสำคัญของสถิติแรงงาน (Statistical Notes)
-    
-    1. **การถ่วงน้ำหนักสถิติ (Weighted Aggregates):**
-       - ตัวเลขสถิติในระดับภาพรวม (เช่น ระดับประเทศ ระดับภาค ผลรวมเพศ) ได้รับการคำนวณและถ่วงน้ำหนักโดยสำนักงานสถิติแห่งชาติไว้แล้วในแถว `รวม`
-       - ระบบดึงค่าจากแถวผลรวมทางการโดยตรง โดยไม่มีการนำอัตราเปอร์เซ็นต์มาหาค่าเฉลี่ยทางคณิตศาสตร์แบบไม่ถ่วงน้ำหนัก เพื่อรักษาความถูกต้องตามหลักสถิติสูงสุด
-    
-    2. **หน่วยวัดจำนวนผู้มีงานทำ (`emp_headcount`):**
-       - มีหน่วยเป็น **พันคน (Thousand Persons)** หากต้องการแปลงเป็นคนให้คูณด้วย 1,000 หรือแปลงเป็นล้านคนโดยหารด้วย 1,000
-    
-    3. **ความไม่ต่อเนื่องของสถิติค่าจ้างปี 2567-2568:**
-       - ค่าจ้างเฉลี่ยในปี พ.ศ. 2567 และ 2568 จัดเก็บในระดับภาพรวมรายปี (`quarter = 0`) จึงไม่มีข้อมูลแยกรายไตรมาส 1 ถึง 4
-    
-    4. **การปรับเปลี่ยนการแบ่งภูมิภาคในปี 2568:**
-       - สำนักงานสถิติแห่งชาติได้แยก `ภาคตะวันออก` (เดิมอยู่ในภาคกลาง) และ `ภาคใต้ชายแดน` (เดิมอยู่ในภาคใต้) เพิ่มขึ้นเป็น 7 ภูมิภาคตั้งแต่ปี 2568 เป็นต้นมา
-    
-    5. **ตัวแปรที่ไม่มีในชุดข้อมูล:**
-       - ชุดข้อมูลนี้ไม่มีข้อมูลประเภทอุตสาหกรรม/สาขาอาชีพ (`industry`), ระดับการศึกษา (`education`) และจำนวนคนว่างงานเป็นตัวเลขคน ระบบจึงไม่มีการแสดงผลการจัดอันดับอุตสาหกรรมเพื่อความซื่อสัตย์ต่อข้อมูลจริง
-    """)
+    trend_data = get_historical_observations(
+        df, filters
+    )
+
+    drill_year = st.session_state[
+        "trend_drill_year"
+    ]
+
+    available_trend_years = (
+        trend_data["year"].astype(int).unique().tolist()
+        if not trend_data.empty
+        else []
+    )
+
+    with st.container(border=True):
+
+        if drill_year is None:
+
+            st.markdown(
+                "**📈 แนวโน้มอัตราการมีงานทำ"
+                "และอัตราการว่างงานรายปี**"
+            )
+
+            st.caption(
+                "คลิกปีใดก็ได้บนกราฟ → "
+                "กราฟนี้เปลี่ยนเป็นรายไตรมาส "
+                "และ Dashboard ทุกแท็บเปลี่ยนเป็นปีนั้น"
+            )
+
+            yearly_fig = build_historical_trend(
+                trend_data
+            )
+
+            if yearly_fig is None:
+                st.info(
+                    "ไม่มีข้อมูลแนวโน้มรายปี"
+                )
+            else:
+
+                year_key = (
+                    "global_year_trend_"
+                    f"{st.session_state['crossfilter_version']}_"
+                    f"{st.session_state['trend_view_version']}"
+                )
+
+                plot_chart(
+                    yearly_fig,
+                    key=year_key,
+                    on_select=(
+                        lambda k=year_key,
+                               v=available_trend_years:
+                        queue_chart_filter(
+                            k,
+                            "year",
+                            v,
+                            drill_down=True,
+                        )
+                    ),
+                    selection_mode="points",
+                )
+
+        else:
+
+            heading, back = st.columns(
+                [4, 1]
+            )
+
+            with heading:
+                st.markdown(
+                    f"**📊 รายไตรมาส ปี พ.ศ. "
+                    f"{drill_year}**"
+                )
+
+                st.caption(
+                    "ปีนี้ถูกเลือกใน Global Filter แล้ว "
+                    "กราฟอื่นทุกแท็บใช้ปีเดียวกัน"
+                )
+
+            with back:
+                st.button(
+                    "↩️ กลับไปรายปี",
+                    key="back_to_yearly",
+                    on_click=reset_trend_view,
+                    use_container_width=True,
+                )
+
+            quarter_fig = build_historical_trend(
+                trend_data,
+                selected_year=drill_year,
+            )
+
+            if quarter_fig is None:
+                st.info(
+                    f"ไม่มีข้อมูลรายไตรมาสปี "
+                    f"{drill_year} ภายใต้เงื่อนไขนี้"
+                )
+            else:
+                plot_chart(
+                    quarter_fig,
+                    key=f"trend_quarters_{drill_year}",
+                )
+
+    # --------------------------------------------------------
+    # OTHER TREND CHARTS
+    # --------------------------------------------------------
+
+    ts_data, wage_data = get_time_series_data(
+        df, filters
+    )
+
+    left, right = st.columns(2)
+
+    with left:
+        render_interactive_chart(
+            create_wage_trend_chart(
+                ts_data, wage_data
+            ),
+            "💵 แนวโน้มค่าจ้างเฉลี่ยรายปี",
+            "ประวัติค่าจ้างปี 2561–2568 "
+            "ภายใต้ตัวกรองพื้นที่และกลุ่มแรงงาน",
+            "wage_trend",
+        )
+
+    with right:
+
+        quarter_fig = create_seasonality_chart(
+            df, filters
+        )
+
+        # Q1-Q4 is a selectable global dimension.
+        render_interactive_chart(
+            quarter_fig,
+            "🌾 อัตราการว่างงานแยกตามไตรมาส",
+            f"ปี พ.ศ. {selected_year} "
+            "· คลิกแท่งเพื่อเปลี่ยนตัวกรองไตรมาส",
+            "seasonality",
+            dimension="quarter",
+            valid_values=[
+                1, 2, 3, 4
+            ],
+        )
+
+    render_interactive_chart(
+        create_headcount_trend_chart(
+            ts_data
+        ),
+        "👥 จำนวนผู้มีงานทำตามปี",
+        "ข้อมูลย้อนหลังตามที่มีจริง",
+        "headcount_trend",
+    )
+
+
+# ============================================================
+# TAB 2 - REGIONAL COMPARISON
+# ============================================================
+
+with tab2:
+
+    st.markdown(
+        "### 🗺️ เปรียบเทียบภูมิภาค"
+    )
+
+    st.caption(
+        "เลือกภาคจากกราฟใดก็ได้ "
+        "แล้ว KPI แผนที่ และแท็บอื่นจะเปลี่ยนตาม"
+    )
+
+    comparison_metric = st.radio(
+        "เลือกตัวชี้วัด",
+        options=[
+            "emp_rate",
+            "unemp_rate",
+            "avg_wage",
+        ],
+        format_func=lambda value: LABELS[value],
+        horizontal=True,
+        key="comparison_metric",
+    )
+
+    # All regions remain available,
+    # even when a specific region is selected.
+    comparison_frame = filter_frame(
+        all_region_data,
+        comparison_metric,
+    )
+
+    region_values = (
+        comparison_frame["region"].astype(str).tolist()
+        if not comparison_frame.empty
+        else []
+    )
+
+    render_interactive_chart(
+        create_regional_ranking_chart(
+            comparison_frame,
+            metric=comparison_metric,
+            selected_region=(
+                selected_region
+                if region_selected
+                else None
+            ),
+        ),
+        "🏆 จัดอันดับภูมิภาค",
+        "คลิกแท่งเพื่อกรองข้อมูลทั้ง Dashboard",
+        "regional_ranking",
+        dimension="region",
+        valid_values=region_values,
+    )
+
+    left, right = st.columns(2)
+
+    with left:
+
+        scatter_frame = (
+            all_region_data.dropna(
+                subset=["avg_wage", "emp_rate"]
+            ).copy()
+        )
+
+        scatter_regions = (
+            scatter_frame["region"].astype(str).tolist()
+            if not scatter_frame.empty
+            else []
+        )
+
+        render_interactive_chart(
+            create_wage_vs_employment_scatter(
+                scatter_frame,
+                selected_region=(
+                    selected_region
+                    if region_selected
+                    else None
+                ),
+            ),
+            "⚖️ ค่าจ้างเฉลี่ย vs อัตราการมีงานทำ",
+            "คลิกจุดของภูมิภาคเพื่อเปลี่ยนตัวกรอง",
+            "regional_scatter",
+            dimension="region",
+            valid_values=scatter_regions,
+        )
+
+    with right:
+
+        area_data = get_area_wage_comparison_data(
+            df, comparison_filters
+        )
+
+        area_regions = (
+            area_data["region"].astype(str).tolist()
+            if not area_data.empty
+            else []
+        )
+
+        render_interactive_chart(
+            create_dumbbell_wage_chart(
+                area_data,
+                selected_region=(
+                    selected_region
+                    if region_selected
+                    else None
+                ),
+            ),
+            "🏙️ ค่าจ้างในเขต vs นอกเขตเทศบาล",
+            "คลิกแท่งของภูมิภาคเพื่อเปลี่ยนตัวกรอง",
+            "regional_area_wage",
+            dimension="region",
+            valid_values=area_regions,
+        )
+
+
+# ============================================================
+# TAB 3 - DEMOGRAPHICS
+# ============================================================
+
+with tab3:
+
+    st.markdown(
+        "### 👥 วิเคราะห์กลุ่มแรงงาน"
+    )
+
+    st.caption(
+        "ข้อมูลนี้เชื่อมกับปี ไตรมาส "
+        "ภูมิภาค เพศ และกลุ่มอายุที่เลือก"
+    )
+
+    age_data = get_demographics_age_data(
+        df, filters
+    )
+
+    left, right = st.columns(2)
+
+    with left:
+        render_interactive_chart(
+            create_gender_headcount_donut(
+                df, filters
+            ),
+            "👫 สัดส่วนผู้มีงานทำแยกตามเพศ",
+            "สัดส่วนจำนวนผู้มีงานทำชายและหญิง "
+            "ภายใต้ตัวกรองปัจจุบัน",
+            "gender_donut",
+        )
+
+    with right:
+        render_interactive_chart(
+            create_demographic_matrix_heatmap(
+                df, filters
+            ),
+            "📊 โครงสร้างผู้มีงานทำตามเพศและอายุ",
+            "จำนวนผู้มีงานทำ หน่วยล้านคน",
+            "demographic_heatmap",
+        )
+
+    left, right = st.columns(2)
+
+    with left:
+
+        render_interactive_chart(
+            create_age_wage_chart(
+                age_data,
+                selected_age=(
+                    filters["age_group"]
+                    if filters["age_group"] != ALL
+                    else None
+                ),
+            ),
+            "💵 ค่าจ้างเฉลี่ยตามช่วงอายุ",
+            "คลิกช่วงอายุเพื่อเปลี่ยนตัวกรองทุกแท็บ",
+            "age_wage",
+            dimension="age_group",
+            valid_values=AGE_ORDER,
+        )
+
+    with right:
+
+        with st.container(border=True):
+            st.markdown(
+                "**🚨 อัตราการว่างงานตามช่วงอายุ**"
+            )
+
+            st.caption(
+                "จัดอันดับจากมากไปน้อย "
+                "คลิกแท่งเพื่อเลือกช่วงอายุ"
+            )
+
+            age_figure, summary = prepare_age_chart(
+                age_data,
+                selected_age=(
+                    filters["age_group"]
+                    if filters["age_group"] != ALL
+                    else None
+                ),
+            )
+
+            if summary is not None:
+                top_age, top_rate = summary
+
+                st.markdown(
+                    f"""
+                    <div class="age-insight">
+                        <div class="label">
+                            🏆 กลุ่มที่มีอัตราว่างงานสูงสุด
+                        </div>
+                        <div class="value">
+                            {html.escape(top_age)}
+                            · {top_rate:.2f}%
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+            if age_figure is None:
+                st.info(
+                    "ไม่มีข้อมูลตามช่วงอายุ"
+                )
+            else:
+
+                age_key = (
+                    "global_age_unemployment_"
+                    f"{st.session_state['crossfilter_version']}"
+                )
+
+                plot_chart(
+                    age_figure,
+                    key=age_key,
+                    on_select=(
+                        lambda k=age_key:
+                        queue_chart_filter(
+                            k,
+                            "age_group",
+                            AGE_ORDER,
+                        )
+                    ),
+                    selection_mode="points",
+                )
+
+            st.caption(
+                "อัตราการว่างงานใช้กำลังแรงงาน"
+                "เป็นฐาน ไม่ใช่ประชากรทั้งหมด"
+            )
+
+
+# ============================================================
+# DATA NOTES
+# ============================================================
+
+st.markdown("---")
+
+with st.expander(
+    "📖 แหล่งข้อมูลและข้อจำกัด"
+):
+    st.markdown(
+        """
+        **แหล่งข้อมูล:** สำนักงานสถิติแห่งชาติ (NSO)
+
+        - ใช้ข้อมูลเฉพาะปี พ.ศ. 2561–2568
+        - ไม่แก้ไขไฟล์ CSV ต้นฉบับ
+        - การคลิกปีบนกราฟแนวโน้มอัปเดต Global Filter
+        - การเลือกภูมิภาคและช่วงอายุใช้ตัวกรองร่วมกัน
+        - กราฟเปรียบเทียบภูมิภาคแสดงทุกภาค
+          เพื่อให้คลิกสลับภาคได้
+        - ค่าอัตราร้อยละไม่ถูกบวกหรือเฉลี่ยโดยพลการ
+        - ข้อมูลบางชุดไม่มีครบทุกตัวกรอง
+        - แผนที่แสดงระดับภูมิภาค ไม่ใช่ระดับจังหวัด
+        - นิยามภูมิภาคก่อนและหลังปี 2568
+          อาจแตกต่างกัน
+        """
+    )

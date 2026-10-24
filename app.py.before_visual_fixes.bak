@@ -1,0 +1,611 @@
+"""
+Thailand Labor Market Interactive Analytics Dashboard
+Built with Streamlit, Pandas, and Plotly
+
+- แผนที่ภูมิภาคคลิกได้จริงด้วย st.plotly_chart(on_select=...) (ไม่ต้องใช้ไลบรารีเพิ่ม)
+- Global cross-filtering ผ่าน st.session_state['filters'] เป็นตัวกรองกลาง
+- ตัวกรองเปลี่ยนผ่าน callback (on_change / on_select / on_click) เพื่อไม่ให้เกิด Rerun วนซ้ำ
+- กราฟที่ไม่มีข้อมูลจริงจะแสดงสถานะ "ไม่มีข้อมูล" แทนการซ่อนหรือสร้างข้อมูลสมมติ
+"""
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+# Page configuration (ต้องเป็นคำสั่ง Streamlit แรกสุด)
+st.set_page_config(
+    page_title="Thailand Labor Market Analytics | แดชบอร์ดตลาดแรงงานไทย",
+    page_icon="🇹🇭",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Import internal modules
+from src.styles import get_custom_css
+from src.data_loader import get_cached_labor_data, AGE_ORDER
+from src.filters import (
+    SIDEBAR_KEYS,
+    init_filter_state,
+    get_current_filters,
+    sanitize_filters,
+    clear_filter,
+    reset_all_filters,
+    on_sidebar_change,
+    chart_key,
+    make_select_callback,
+    get_regions_for_year,
+    get_quarters_for_year,
+)
+from src.metrics import (
+    get_kpis,
+    get_time_series_data,
+    get_regional_comparison_data,
+    get_demographics_gender_data,
+    get_demographics_age_data,
+    get_area_wage_comparison_data,
+)
+from src.charts import (
+    create_time_series_chart,
+    create_wage_trend_chart,
+    create_headcount_trend_chart,
+    create_seasonality_chart,
+    create_regional_ranking_chart,
+    create_wage_vs_employment_scatter,
+    create_dumbbell_wage_chart,
+    create_gender_gap_chart,
+    create_age_wage_chart,
+    create_youth_unemployment_chart,
+    create_demographic_matrix_heatmap,
+    create_thailand_map,
+)
+
+# Apply UI styling
+st.markdown(get_custom_css(), unsafe_allow_html=True)
+
+ALL = 'ทั้งหมด'
+MAP_HEIGHT = 720
+PLOT_CONFIG = {'displayModeBar': False}
+NO_DATA_MSG = "ไม่มีข้อมูลจริงในชุดข้อมูลสำหรับตัวกรองที่เลือก"
+
+METRIC_META = {
+    'emp_rate': {'label': 'อัตราการมีงานทำ', 'unit': '%', 'fmt': '{:,.2f}'},
+    'unemp_rate': {'label': 'อัตราการว่างงาน', 'unit': '%', 'fmt': '{:,.2f}'},
+    'avg_wage': {'label': 'ค่าจ้างเฉลี่ย', 'unit': 'บาท/เดือน', 'fmt': '{:,.0f}'},
+}
+
+
+# -------------------------------------------------------------
+# HELPER FUNCTIONS
+# -------------------------------------------------------------
+def _stretch(fn, *args, **kwargs):
+    """เรียกฟังก์ชัน Streamlit ให้ยืดเต็มความกว้าง รองรับทั้ง Streamlit รุ่นเก่าและรุ่นใหม่."""
+    try:
+        return fn(*args, use_container_width=True, **kwargs)
+    except TypeError:
+        return fn(*args, width='stretch', **kwargs)
+
+
+def valid_metric(value):
+    try:
+        return value is not None and bool(np.isfinite(float(value)))
+    except (TypeError, ValueError):
+        return False
+
+
+def valid_frame(frame, metric):
+    """คืน DataFrame เฉพาะแถวที่มีค่าจริงของตัวชี้วัด (ไม่มี -> DataFrame ว่าง)."""
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty or metric not in frame.columns:
+        return pd.DataFrame(columns=['region', metric])
+    out = frame.copy()
+    out[metric] = pd.to_numeric(out[metric], errors='coerce')
+    return out.dropna(subset=[metric])
+
+
+def fmt_metric(metric, value):
+    if not valid_metric(value):
+        return 'ไม่มีข้อมูล'
+    meta = METRIC_META[metric]
+    return f"{meta['fmt'].format(float(value))} {meta['unit']}"
+
+
+def chart_card(title, caption, fig, name, dimension=None, valid_values=None, empty_msg=NO_DATA_MSG):
+    """
+    วาดการ์ดกราฟ: ถ้าไม่มีข้อมูลจริง (fig เป็น None) จะแสดงสถานะ 'ไม่มีข้อมูล'
+    ถ้าระบุ dimension กราฟจะคลิกเพื่อกรองข้อมูลทั้ง Dashboard ได้
+    """
+    with st.container(border=True):
+        st.markdown(f"**{title}**")
+        if caption:
+            st.caption(caption)
+        if fig is None:
+            st.info(f"📭 {empty_msg}")
+            return
+        key = chart_key(name)
+        if dimension:
+            _stretch(
+                st.plotly_chart, fig, key=key, config=PLOT_CONFIG,
+                on_select=make_select_callback(key, dimension, valid_values),
+                selection_mode="points",
+            )
+        else:
+            _stretch(st.plotly_chart, fig, key=key, config=PLOT_CONFIG)
+
+
+def kpi_card(title, value_text, unit, note, color_class):
+    st.markdown(f"""
+    <div class="kpi-card {color_class}">
+        <div class="kpi-title">{title}</div>
+        <div class="kpi-value">{value_text}<span class="kpi-unit">{unit}</span></div>
+        <div class="kpi-subtext">{note}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def delta_text(value, ref, unit, decimals):
+    if not (valid_metric(value) and valid_metric(ref)):
+        return None
+    diff = float(value) - float(ref)
+    return f"{diff:+,.{decimals}f} {unit} เทียบทั้งประเทศ"
+
+
+# -------------------------------------------------------------
+# STATE + DATA
+# -------------------------------------------------------------
+init_filter_state()
+
+try:
+    df = get_cached_labor_data()
+except Exception as e:
+    st.error(f"❌ เกิดข้อผิดพลาดในการโหลดข้อมูล: {e}")
+    st.stop()
+
+# ตรวจความถูกต้องของตัวกรอง (เช่น ปีที่แบ่ง 5 ภาค ไม่มี 'ภาคตะวันออก') ก่อนสร้าง widget
+sanitize_filters(df)
+filters = dict(get_current_filters())
+sel_region = filters['region']
+year_regions = get_regions_for_year(df, filters['year'])
+
+
+# -------------------------------------------------------------
+# SIDEBAR CONTROLS (ค่าของ widget ถูกซิงค์กับ st.session_state['filters'])
+# -------------------------------------------------------------
+with st.sidebar:
+    st.markdown("""
+    <div class="sidebar-brand-card">
+        <h2>🇹🇭 Labor Analytics</h2>
+        <p>สถิติตลาดแรงงานไทย (NSO Thailand)</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("### 🔍 ตัวกรองข้อมูลหลัก (Global Filters)")
+
+    avail_years = sorted(df['year'].unique().tolist(), reverse=True)
+    st.selectbox(
+        "📅 ปี พ.ศ.", options=avail_years, key=SIDEBAR_KEYS['year'],
+        on_change=on_sidebar_change, args=('year',)
+    )
+
+    quarter_opts = [ALL] + get_quarters_for_year(df, filters['year'])
+    st.selectbox(
+        "⏱️ ไตรมาส", options=quarter_opts, key=SIDEBAR_KEYS['quarter'],
+        format_func=lambda x: f"ไตรมาส {x}" if isinstance(x, (int, np.integer)) else "ทั้งหมด (ภาพรวม)",
+        on_change=on_sidebar_change, args=('quarter',)
+    )
+
+    st.selectbox(
+        "📍 ภูมิภาค", options=[ALL] + year_regions, key=SIDEBAR_KEYS['region'],
+        on_change=on_sidebar_change, args=('region',)
+    )
+    st.caption(f"ปี {filters['year']} ใช้การแบ่ง {len(year_regions)} ภูมิภาค (คลิกบนแผนที่เพื่อเลือกภาคได้โดยตรง)")
+
+    st.selectbox(
+        "🏙️ เขตการปกครอง", options=[ALL, 'ในเขตเทศบาล', 'นอกเขตเทศบาล'],
+        key=SIDEBAR_KEYS['area'], on_change=on_sidebar_change, args=('area',)
+    )
+
+    st.selectbox(
+        "👤 เพศ", options=[ALL, 'ชาย', 'หญิง'],
+        key=SIDEBAR_KEYS['sex'], on_change=on_sidebar_change, args=('sex',)
+    )
+
+    st.selectbox(
+        "🎂 กลุ่มอายุ", options=[ALL] + [a for a in AGE_ORDER if a != 'รวม'],
+        key=SIDEBAR_KEYS['age_group'], on_change=on_sidebar_change, args=('age_group',)
+    )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    _stretch(st.button, "🔄 รีเซ็ตตัวกรองทั้งหมด", type="primary", on_click=reset_all_filters)
+
+    st.markdown("---")
+    st.markdown("""
+    <div style="font-size: 0.8rem; color: #CDB8D6; line-height: 1.4;">
+        <b>แหล่งข้อมูล:</b> การสำรวจภาวะการทำงานของประชากร สำนักงานสถิติแห่งชาติ (NSO)<br>
+        <b>เทคโนโลยี:</b> Python, Streamlit, Pandas, Plotly<br>
+        <b>เวอร์ชัน:</b> 1.1.0
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# -------------------------------------------------------------
+# MAIN HEADER + ACTIVE FILTER PILLS + CAVEATS
+# -------------------------------------------------------------
+st.markdown("""
+<div class="main-header-banner">
+    <div>
+        <h1 class="main-header-title">🇹🇭 แดชบอร์ดวิเคราะห์สถิติตลาดแรงงานไทย</h1>
+        <p class="main-header-subtitle">ติดตามภาวะการทำงาน ค่าจ้าง อัตราการว่างงาน และโครงสร้างแรงงานแบบโต้ตอบ — คลิกภูมิภาคบนแผนที่เพื่อกรองทั้ง Dashboard</p>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+label_map = {'quarter': 'ไตรมาส', 'region': 'ภาค', 'area': 'พื้นที่', 'sex': 'เพศ', 'age_group': 'อายุ'}
+pills = ['<div class="active-filters-container"><span style="font-size:0.85rem; font-weight:600; color:#43334C;">ตัวกรองที่ใช้งาน:</span>']
+for dim, val in filters.items():
+    if dim == 'year':
+        pills.append(f'<span class="filter-pill"><span class="filter-pill-label">ปี:</span> <span class="filter-pill-val">{val}</span></span>')
+    elif val != ALL:
+        pills.append(f'<span class="filter-pill"><span class="filter-pill-label">{label_map.get(dim, dim)}:</span> <span class="filter-pill-val">{val}</span></span>')
+pills.append('</div>')
+st.markdown("".join(pills), unsafe_allow_html=True)
+
+kpis = get_kpis(df, filters)
+
+caveats = [c for c in (kpis.get('wage_caveat'), kpis.get('headcount_caveat')) if c]
+if caveats:
+    caveat_text = "<br>".join("• " + c for c in caveats)
+    st.markdown(f"""
+    <div class="caveat-banner">
+        <div class="caveat-title">ℹ️ ข้อควรทราบทางสถิติสำหรับตัวกรองปัจจุบัน:</div>
+        {caveat_text}
+    </div>
+    """, unsafe_allow_html=True)
+
+# ข้อมูลรายภูมิภาค (ทุกภาคของปีที่เลือก) ใช้ร่วมกันทั้งแผนที่ ตารางจัดอันดับ และ Scatter
+reg_data = get_regional_comparison_data(df, filters)
+
+
+# -------------------------------------------------------------
+# TAB NAVIGATION
+# -------------------------------------------------------------
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📊 ภาพรวมตลาดแรงงานไทย",
+    "🗺️ เปรียบเทียบภูมิภาค",
+    "👥 วิเคราะห์กลุ่มแรงงาน",
+    "📋 ข้อมูลและข้อจำกัด"
+])
+
+
+# =============================================================
+# TAB 1: ภาพรวมตลาดแรงงานไทย (KPI + MAP + DETAIL + TREND)
+# =============================================================
+with tab1:
+    # ---------- KPI ----------
+    period_label = kpis.get('period_label') or f"ปี {filters['year']}"
+    scope_label = sel_region if sel_region != ALL else 'ทั้งประเทศ'
+    st.caption(f"📌 ตัวเลขตัวชี้วัดหลัก: **{scope_label}** · {period_label}")
+
+    kpi_defs = [
+        ('avg_wage', '💵 ค่าจ้างเฉลี่ย', 'บาท/เดือน', 'ผู้มีงานทำที่เป็นลูกจ้าง', 'kpi-card-1', '{:,.0f}'),
+        ('emp_rate', '📈 อัตราการมีงานทำ', '%', 'สัดส่วนต่อประชากรวัยแรงงาน', 'kpi-card-2', '{:,.2f}'),
+        ('unemp_rate', '⚠️ อัตราการว่างงาน', '%', 'สัดส่วนผู้ว่างงานต่อกำลังแรงงาน', 'kpi-card-3', '{:,.2f}'),
+        ('emp_headcount_m', '👥 ผู้มีงานทำ', 'ล้านคน', '', 'kpi-card-4', '{:,.2f}'),
+    ]
+    for col, (metric, title, unit, note, css, fmt) in zip(st.columns(4), kpi_defs):
+        with col:
+            value = kpis.get(metric)
+            if valid_metric(value):
+                if metric == 'emp_headcount_m' and valid_metric(kpis.get('emp_headcount_k')):
+                    note = f"({float(kpis['emp_headcount_k']):,.1f} พันคน)"
+                kpi_card(title, fmt.format(float(value)), unit, note, css)
+            else:
+                kpi_card(title, "—", "", "ไม่มีข้อมูลสำหรับตัวกรองนี้", css)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ---------- MAP ----------
+    st.markdown("### 🗺️ แผนที่ตลาดแรงงานรายภูมิภาค")
+    map_metric = st.radio(
+        "ตัวชี้วัดที่ใช้ระบายสีแผนที่",
+        options=['emp_rate', 'unemp_rate', 'avg_wage'],
+        format_func=lambda x: {
+            'emp_rate': 'อัตราการมีงานทำ (%)',
+            'unemp_rate': 'อัตราการว่างงาน (%)',
+            'avg_wage': 'ค่าจ้างเฉลี่ย (บาท/เดือน)',
+        }[x],
+        horizontal=True,
+        key='overview_map_metric',
+    )
+    map_regions = valid_frame(reg_data, map_metric)
+
+    map_col, detail_col = st.columns([2.6, 1], gap="large")
+
+    with map_col:
+        with st.container(border=True):
+            if map_regions.empty:
+                st.info(f"📭 ไม่มีข้อมูลรายภาคของตัวชี้วัดนี้ในช่วงเวลาที่เลือก (ปี {filters['year']})")
+            else:
+                if sel_region != ALL:
+                    st.caption(f"📍 กำลังซูมที่ **{sel_region}** — คลิกพื้นที่ภาคอื่นเพื่อเปลี่ยน หรือกดปุ่ม 'กลับไปดูทั้งประเทศ'")
+                else:
+                    st.caption("👆 คลิกบนพื้นที่ภูมิภาคเพื่อซูมและกรองข้อมูลทั้ง Dashboard")
+                map_fig = create_thailand_map(
+                    map_regions, metric=map_metric, year=filters['year'],
+                    selected_region=sel_region, height=MAP_HEIGHT,
+                )
+                if map_fig is None:
+                    st.warning("ไม่พบไฟล์ขอบเขตภูมิภาค assets/thailand_regions.geojson จึงไม่สามารถวาดแผนที่ได้")
+                else:
+                    map_key = chart_key('regional_map')
+                    _stretch(
+                        st.plotly_chart, map_fig, key=map_key, config=PLOT_CONFIG,
+                        on_select=make_select_callback(
+                            map_key, 'region', map_regions['region'].astype(str).tolist()
+                        ),
+                        selection_mode="points",
+                    )
+
+    with detail_col:
+        with st.container(border=True):
+            st.markdown("**📌 รายละเอียดพื้นที่**")
+            if sel_region != ALL:
+                st.markdown(f"### {sel_region}")
+                st.caption(f"{period_label}")
+                _stretch(st.button, "↩️ กลับไปดูทั้งประเทศ", key="map_back_to_country",
+                         on_click=clear_filter, args=('region',))
+
+                nat = get_kpis(df, {**filters, 'region': ALL})
+                st.metric("อัตราการมีงานทำ",
+                          fmt_metric('emp_rate', kpis.get('emp_rate')),
+                          delta=delta_text(kpis.get('emp_rate'), nat.get('emp_rate'), 'จุด%', 2),
+                          delta_color="off")
+                st.metric("อัตราการว่างงาน",
+                          fmt_metric('unemp_rate', kpis.get('unemp_rate')),
+                          delta=delta_text(kpis.get('unemp_rate'), nat.get('unemp_rate'), 'จุด%', 2),
+                          delta_color="off")
+                st.metric("ค่าจ้างเฉลี่ย",
+                          fmt_metric('avg_wage', kpis.get('avg_wage')),
+                          delta=delta_text(kpis.get('avg_wage'), nat.get('avg_wage'), 'บาท', 0),
+                          delta_color="off")
+                if valid_metric(kpis.get('emp_headcount_m')):
+                    share = None
+                    if valid_metric(nat.get('emp_headcount_k')) and float(nat['emp_headcount_k']) > 0 \
+                            and valid_metric(kpis.get('emp_headcount_k')):
+                        share = f"{float(kpis['emp_headcount_k']) / float(nat['emp_headcount_k']) * 100:.1f}% ของผู้มีงานทำทั้งประเทศ"
+                    st.metric("ผู้มีงานทำ", f"{float(kpis['emp_headcount_m']):,.2f} ล้านคน",
+                              delta=share, delta_color="off")
+
+                ranked = map_regions.set_index(map_regions['region'].astype(str))[map_metric]
+                if sel_region in ranked.index:
+                    rank = int(ranked.rank(ascending=False, method='min')[sel_region])
+                    st.info(f"🏅 {METRIC_META[map_metric]['label']}: อันดับ {rank} จาก {len(ranked)} ภาค (1 = สูงสุด)")
+            else:
+                st.markdown("### ประเทศไทย")
+                st.caption(f"{period_label} · ตัวเลขระดับประเทศ")
+                st.metric("อัตราการมีงานทำ", fmt_metric('emp_rate', kpis.get('emp_rate')))
+                st.metric("อัตราการว่างงาน", fmt_metric('unemp_rate', kpis.get('unemp_rate')))
+                st.metric("ค่าจ้างเฉลี่ย", fmt_metric('avg_wage', kpis.get('avg_wage')))
+                if not map_regions.empty:
+                    series = map_regions.set_index(map_regions['region'].astype(str))[map_metric]
+                    top, low = series.idxmax(), series.idxmin()
+                    st.markdown(f"**{METRIC_META[map_metric]['label']}รายภาค**")
+                    st.markdown(f"🔺 สูงสุด: **{top}** ({fmt_metric(map_metric, series[top])})")
+                    st.markdown(f"🔻 ต่ำสุด: **{low}** ({fmt_metric(map_metric, series[low])})")
+                st.caption("เลือกภาคโดยคลิกที่แผนที่ ระบบจะซูมและกรองข้อมูลทุกแท็บให้อัตโนมัติ")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ---------- TRENDS ----------
+    ts_data, wage_data = get_time_series_data(df, filters)
+
+    chart_card(
+        "📈 แนวโน้มอัตราการมีงานทำและอัตราการว่างงานตามเวลา",
+        "รายไตรมาสตามตัวกรองที่เลือก (คลิกจุดบนกราฟเพื่อกรองปี)",
+        create_time_series_chart(ts_data), "chart_rates_ts", dimension='year'
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        chart_card(
+            "💵 ทิศทางค่าจ้างเฉลี่ย (บาท/เดือน)",
+            "ค่าจ้างเฉลี่ยรายปีตามตัวกรอง (คลิกจุดเพื่อเลือกปี)",
+            create_wage_trend_chart(ts_data, wage_data), "chart_wage_trend", dimension='year'
+        )
+    with c2:
+        chart_card(
+            "🌾 อัตราการว่างงานรายไตรมาส (Seasonality)",
+            "ค่าที่เผยแพร่จริงของแต่ละปีแยกตามไตรมาส ไม่นำอัตราร้อยละมาเฉลี่ยรวมกัน (คลิกเพื่อเลือกไตรมาส)",
+            create_seasonality_chart(df, filters), "chart_seasonality", dimension='quarter'
+        )
+
+    chart_card(
+        "👥 จำนวนผู้มีงานทำตามช่วงเวลา (ล้านคน)",
+        "ผลรวมจำนวนผู้มีงานทำตามภาค เพศ และอายุที่เลือก (หน่วยในชุดข้อมูลเป็นพันคน แปลงเป็นล้านคนแล้ว)",
+        create_headcount_trend_chart(ts_data), "chart_hc_trend", dimension='year'
+    )
+
+
+# =============================================================
+# TAB 2: เปรียบเทียบภูมิภาค
+# =============================================================
+with tab2:
+    st.caption(
+        f"เปรียบเทียบ {len(year_regions)} ภูมิภาคของปี {filters['year']} "
+        f"ตามตัวกรองเพศ อายุ เขตการปกครอง และไตรมาสที่เลือก"
+        + (f" · ไฮไลต์: **{sel_region}**" if sel_region != ALL else "")
+    )
+    rank_metric = st.radio(
+        "ตัวชี้วัดสำหรับจัดอันดับ",
+        options=['emp_rate', 'unemp_rate', 'avg_wage'],
+        format_func=lambda x: {
+            'emp_rate': 'อัตราการมีงานทำ (%)',
+            'unemp_rate': 'อัตราการว่างงาน (%)',
+            'avg_wage': 'ค่าจ้างเฉลี่ย (บาท/เดือน)',
+        }[x],
+        horizontal=True,
+        key='compare_rank_metric',
+    )
+    rank_frame = valid_frame(reg_data, rank_metric)
+    rank_regions = rank_frame['region'].astype(str).tolist()
+    highlight = sel_region if sel_region != ALL else None
+
+    chart_card(
+        f"🏆 จัดอันดับภูมิภาค: {METRIC_META[rank_metric]['label']}",
+        "คลิกที่แท่งภูมิภาคเพื่อกรองข้อมูลเฉพาะภาคนั้นทั้ง Dashboard",
+        create_regional_ranking_chart(rank_frame, metric=rank_metric, selected_region=highlight),
+        "chart_regional_rank", dimension='region', valid_values=rank_regions
+    )
+
+    scat_frame = reg_data
+    scat_regions = []
+    if isinstance(reg_data, pd.DataFrame) and not reg_data.empty and {'avg_wage', 'emp_rate'}.issubset(reg_data.columns):
+        scat_frame = reg_data.dropna(subset=['avg_wage', 'emp_rate'])
+        scat_regions = scat_frame['region'].astype(str).tolist()
+
+    c_scat, c_dumb = st.columns(2)
+    with c_scat:
+        chart_card(
+            "⚖️ ค่าจ้างเฉลี่ย vs อัตราการมีงานทำ (Scatter)",
+            "แต่ละจุดคือหนึ่งภูมิภาค ขนาดจุดแทนจำนวนผู้มีงานทำ (คลิกจุดเพื่อเลือกภาค)",
+            create_wage_vs_employment_scatter(scat_frame, selected_region=highlight),
+            "chart_wage_scatter", dimension='region', valid_values=scat_regions,
+            empty_msg="ไม่มีข้อมูลค่าจ้างและอัตราการมีงานทำครบทั้งสองตัวชี้วัดสำหรับการเปรียบเทียบนี้ "
+                      "(เช่น ปี 2567–2568 มีค่าจ้างเฉพาะภาพรวมรายปี)"
+        )
+    with c_dumb:
+        area_data = get_area_wage_comparison_data(df, filters)
+        dumb_regions = []
+        if isinstance(area_data, pd.DataFrame) and not area_data.empty:
+            dumb_regions = area_data['region'].astype(str).tolist()
+        chart_card(
+            "🏙️ ช่องว่างค่าจ้างเมือง vs ชนบท (Dumbbell)",
+            "ค่าจ้างในเขตเทศบาลเทียบนอกเขตเทศบาลของแต่ละภาค (คลิกเพื่อเลือกภาค)",
+            create_dumbbell_wage_chart(area_data, selected_region=highlight),
+            "chart_area_dumbbell", dimension='region', valid_values=dumb_regions
+        )
+
+
+# =============================================================
+# TAB 3: วิเคราะห์กลุ่มแรงงาน
+# =============================================================
+with tab3:
+    scope_text = sel_region if sel_region != ALL else 'ทั้งประเทศ'
+    st.caption(f"ขอบเขตข้อมูล: **{scope_text}** · ปี {filters['year']}")
+
+    gender_data = get_demographics_gender_data(df, filters)
+    age_data = get_demographics_age_data(df, filters)
+    sex_sel = filters['sex'] if filters['sex'] != ALL else None
+    age_sel = filters['age_group'] if filters['age_group'] != ALL else None
+
+    g1, g2 = st.columns(2)
+    with g1:
+        chart_card(
+            "👫 ช่องว่างค่าจ้างระหว่างเพศ (Gender Wage Gap)",
+            "ค่าจ้างเฉลี่ยชายเทียบหญิง (คลิกแท่งเพื่อกรองเฉพาะเพศนั้น)",
+            create_gender_gap_chart(gender_data, selected_sex=sex_sel),
+            "chart_gender_gap", dimension='sex', valid_values=['ชาย', 'หญิง']
+        )
+    with g2:
+        chart_card(
+            "📊 โครงสร้างผู้มีงานทำตามเพศและช่วงอายุ (Heatmap)",
+            "จำนวนผู้มีงานทำ (ล้านคน) จากข้อมูลจริงรายเพศ × รายช่วงอายุ ตามภาคที่เลือก",
+            create_demographic_matrix_heatmap(df, filters), "chart_demo_heatmap"
+        )
+
+    a1, a2 = st.columns(2)
+    age_values = [a for a in AGE_ORDER if a != 'รวม']
+    with a1:
+        chart_card(
+            "📈 โครงสร้างค่าจ้างตามช่วงอายุ (Age-Wage Curve)",
+            "ค่าจ้างเฉลี่ยแต่ละช่วงอายุ (คลิกเพื่อกรองช่วงอายุ)",
+            create_age_wage_chart(age_data, selected_age=age_sel),
+            "chart_age_wage", dimension='age_group', valid_values=age_values
+        )
+    with a2:
+        chart_card(
+            "🚨 อัตราการว่างงานแยกตามช่วงอายุ (เน้นเยาวชน 15–24 ปี)",
+            "อัตราการว่างงานที่เผยแพร่จริงของแต่ละช่วงอายุ (คลิกเพื่อกรองช่วงอายุ)",
+            create_youth_unemployment_chart(age_data, selected_age=age_sel),
+            "chart_youth_unemp", dimension='age_group', valid_values=age_values
+        )
+
+
+# =============================================================
+# TAB 4: ข้อมูลและข้อจำกัด
+# =============================================================
+with tab4:
+    st.markdown("""
+    <div class="bento-card">
+        <div class="bento-card-title">📋 ตารางสำรวจข้อมูลตลาดแรงงาน (Data Explorer)</div>
+        <div class="bento-card-subtitle">แสดงข้อมูลที่สอดคล้องกับตัวกรองที่กำลังใช้งาน พร้อมส่งออกเป็น CSV</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    tbl_mask = pd.Series(True, index=df.index)
+    tbl_mask &= (df['year'] == int(filters['year']))
+    if filters['quarter'] != ALL and int(filters['quarter']) > 0:
+        tbl_mask &= (df['quarter'] == int(filters['quarter']))
+    if filters['region'] != ALL:
+        tbl_mask &= (df['clean_region'] == filters['region'])
+    if filters['area'] != ALL:
+        tbl_mask &= (df['clean_area'] == filters['area'])
+    if filters['sex'] != ALL:
+        tbl_mask &= (df['clean_sex'] == filters['sex'])
+    if filters['age_group'] != ALL:
+        tbl_mask &= (df['clean_age'] == filters['age_group'])
+
+    tbl_display = df.loc[tbl_mask, [
+        'year', 'quarter', 'clean_region', 'clean_area', 'clean_sex', 'clean_age',
+        'avg_wage', 'emp_rate', 'unemp_rate', 'emp_headcount'
+    ]].rename(columns={
+        'year': 'ปี พ.ศ.',
+        'quarter': 'ไตรมาส',
+        'clean_region': 'ภูมิภาค',
+        'clean_area': 'เขตการปกครอง',
+        'clean_sex': 'เพศ',
+        'clean_age': 'กลุ่มอายุ',
+        'avg_wage': 'ค่าจ้างเฉลี่ย (บาท)',
+        'emp_rate': 'อัตราการมีงานทำ (%)',
+        'unemp_rate': 'อัตราการว่างงาน (%)',
+        'emp_headcount': 'ผู้มีงานทำ (พันคน)'
+    })
+
+    if tbl_display.empty:
+        st.info(f"📭 {NO_DATA_MSG}")
+    else:
+        st.write(f"พบข้อมูลทั้งหมด: **{len(tbl_display):,} แถว** (แสดงตัวอย่าง 500 แถวแรก — ไฟล์ CSV มีครบทุกแถว)")
+        _stretch(st.dataframe, tbl_display.head(500), hide_index=True)
+        csv_data = tbl_display.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label="📥 ดาวน์โหลดข้อมูลชุดนี้เป็น CSV",
+            data=csv_data,
+            file_name=f"labor_data_{filters['year']}.csv",
+            mime="text/csv"
+        )
+
+    st.markdown("---")
+    st.markdown("""
+    ### 📖 คำนิยามและข้อจำกัดสำคัญของสถิติแรงงาน
+
+    1. **อัตราร้อยละไม่ถูกนำมาเฉลี่ยหรือบวกกัน**
+       - อัตราการมีงานทำและอัตราการว่างงานของทุกระดับ (ประเทศ ภาค เพศ อายุ) อ่านจากแถวที่ NSO คำนวณและเผยแพร่ไว้แล้วโดยตรง
+         ไม่มีการนำอัตราร้อยละของกลุ่มย่อยมาหาค่าเฉลี่ยเอง
+
+    2. **จำนวนผู้มีงานทำ (`emp_headcount`)**
+       - หน่วยในชุดข้อมูลคือ **พันคน** ชุดข้อมูลไม่มีแถวผลรวมของจำนวนคน ระบบจึงรวมจากเซลล์ เพศ × ช่วงอายุ × ภาค
+         (ซึ่งเป็นจำนวนนับที่บวกกันได้) หลังตัดแถวที่ซ้ำกัน และไม่มีมิติเขตเทศบาลสำหรับจำนวนคน
+
+    3. **ค่าจ้างเฉลี่ยปี 2567–2568 (ไตรมาส 0)**
+       - ค่าจ้างของสองปีนี้ถูกเก็บในไตรมาส 0 ไม่แยกรายไตรมาส และในไฟล์ข้อมูลมีหลายค่าต่อกลุ่มเดียวกัน (3–5 ค่า)
+         ระบบแสดงค่าเฉลี่ยของค่าที่มีอยู่เป็นค่าประมาณระดับปี จึงควรใช้เปรียบเทียบเชิงแนวโน้มอย่างระมัดระวัง
+
+    4. **การแบ่งภูมิภาค 5 และ 7 ภาค**
+       - ปี 2555–2567 ใช้ 5 ภูมิภาค: กรุงเทพมหานคร ภาคกลาง ภาคเหนือ ภาคตะวันออกเฉียงเหนือ ภาคใต้
+       - ปี 2568–2569 ใช้ 7 ภูมิภาค โดยแยก `ภาคตะวันออก` ออกจากภาคกลาง และ `ภาคใต้ชายแดน` ออกจากภาคใต้
+         ตัวเลขของภาคกลางและภาคใต้ก่อนและหลังปี 2568 จึงเปรียบเทียบโดยตรงไม่ได้
+       - แผนที่สร้างจากขอบเขตจังหวัดที่รวมเป็นภูมิภาคตามการแบ่งของปีที่เลือก
+
+    5. **ปี 2569 มีข้อมูลเฉพาะไตรมาส 1**
+
+    6. **ตัวแปรที่ไม่มีในชุดข้อมูล**
+       - ไม่มีข้อมูลอุตสาหกรรม ระดับการศึกษา และจำนวนผู้ว่างงานเป็นจำนวนคน ระบบจึงไม่แสดงกราฟเหล่านี้
+         และจะแสดง "ไม่มีข้อมูล" เมื่อกราฟใดไม่มีค่าจริงรองรับ
+    """)

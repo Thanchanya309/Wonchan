@@ -1,621 +1,1306 @@
-"""
-Plotly Chart Generators for Thailand Labor Market Dashboard
-Modern Admin Bento Grid Theme with Pink-Purple Palette and Kanit Font
-"""
-import json
-import os
-import plotly.graph_objects as go
-import plotly.express as px
-import pandas as pd
-import numpy as np
 
-# Palette Constants
-COLOR_PINK = '#E83C91'
-COLOR_PURPLE = '#843A7D'
-COLOR_DARK_PURPLE = '#43334C'
-COLOR_SKY_BLUE = '#57C7FF'
-COLOR_ORANGE = '#F7A531'
-COLOR_SOFT_PINK = '#FBEAF3'
-COLOR_CARD_BG = '#FFFFFF'
-COLOR_MUTED = '#8C7B94'
-COLOR_GRID = '#F0E8EE'
-FONT_FAMILY = 'Kanit, sans-serif'
+"""
+Thailand Labor Market Dashboard - Plotly Charts
+
+Compatible with latest app.py:
+- Fixed-height interactive regional map
+- Regional ranking and cross-filtering
+- Yearly trend (click year for quarterly drill-down in app.py)
+- Ranked age unemployment spotlight
+- Gender donut, scatter, grouped wage bars and heatmap
+
+Uses real data passed from the project's data and metrics modules.
+"""
+
+import json
+from functools import lru_cache
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+
+
+# ============================================================
+# THEME AND CONSTANTS
+# ============================================================
+
+COLOR_PINK = "#E83C91"
+COLOR_PURPLE = "#843A7D"
+COLOR_DARK = "#43334C"
+COLOR_BLUE = "#57A8F5"
+COLOR_ORANGE = "#F7A531"
+COLOR_MUTED = "#8C7B94"
+COLOR_GRID = "#F0E8EE"
+FONT = "Kanit, sans-serif"
+
+MAP_COLORS = [
+    [0.00, "#D95A9A"],
+    [0.25, "#C54C9D"],
+    [0.50, "#AA429B"],
+    [0.75, "#873D92"],
+    [1.00, "#633078"],
+]
+
+REGION_COLORS = {
+    "กรุงเทพมหานคร": "#7541D9",
+    "ภาคกลาง": "#F03284",
+    "ภาคเหนือ": "#1595D2",
+    "ภาคตะวันออกเฉียงเหนือ": "#E49A18",
+    "ภาคใต้": "#159B84",
+    "ภาคตะวันออก": "#D85342",
+    "ภาคใต้ชายแดน": "#9250AB",
+}
+
+REGIONS_5 = [
+    "กรุงเทพมหานคร",
+    "ภาคกลาง",
+    "ภาคเหนือ",
+    "ภาคตะวันออกเฉียงเหนือ",
+    "ภาคใต้",
+]
+
+REGIONS_7 = REGIONS_5 + [
+    "ภาคตะวันออก",
+    "ภาคใต้ชายแดน",
+]
+
+AGES = [
+    "15-19 ปี",
+    "20-24 ปี",
+    "25-29 ปี",
+    "30-34 ปี",
+    "35-39 ปี",
+    "40-49 ปี",
+    "50-59 ปี",
+    "60 ปีขึ้นไป",
+]
+
+METRIC_LABELS = {
+    "avg_wage": "ค่าจ้างเฉลี่ย (บาท/เดือน)",
+    "emp_rate": "อัตราการมีงานทำ (%)",
+    "unemp_rate": "อัตราการว่างงาน (%)",
+}
+
+
+# ============================================================
+# COMMON HELPERS
+# ============================================================
+
+def _clean(frame, columns):
+    if not isinstance(frame, pd.DataFrame):
+        return pd.DataFrame(columns=columns)
+
+    if frame.empty or not set(columns).issubset(frame.columns):
+        return pd.DataFrame(columns=columns)
+
+    return frame.dropna(subset=columns).copy()
 
 
 def apply_chart_theme(fig, height=380, margin=None):
-    """Apply consistent styling across all Plotly figures."""
     if margin is None:
-        margin = dict(l=40, r=30, t=50, b=40)
+        margin = dict(l=45, r=30, t=55, b=45)
 
     fig.update_layout(
-        font=dict(family=FONT_FAMILY, color=COLOR_DARK_PURPLE, size=12),
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
         height=height,
         margin=margin,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(
+            family=FONT,
+            color=COLOR_DARK,
+            size=12,
+        ),
         hoverlabel=dict(
-            bgcolor=COLOR_DARK_PURPLE,
-            font_size=12,
-            font_family=FONT_FAMILY,
-            font_color='#FFFFFF'
-        ),
-        xaxis=dict(
-            showgrid=True,
-            gridcolor=COLOR_GRID,
-            linecolor=COLOR_GRID,
-            tickfont=dict(family=FONT_FAMILY, color=COLOR_MUTED),
-            title_font=dict(family=FONT_FAMILY, color=COLOR_DARK_PURPLE, size=13)
-        ),
-        yaxis=dict(
-            showgrid=True,
-            gridcolor=COLOR_GRID,
-            linecolor=COLOR_GRID,
-            tickfont=dict(family=FONT_FAMILY, color=COLOR_MUTED),
-            title_font=dict(family=FONT_FAMILY, color=COLOR_DARK_PURPLE, size=13)
+            bgcolor=COLOR_DARK,
+            font=dict(
+                family=FONT,
+                size=12,
+                color="white",
+            ),
         ),
         legend=dict(
             orientation="h",
+            x=0.5,
+            xanchor="center",
+            y=1.08,
             yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
-            font=dict(family=FONT_FAMILY, size=11)
-        )
+        ),
+        clickmode="event+select",
+        dragmode=False,
+    )
+
+    fig.update_xaxes(
+        showgrid=True,
+        gridcolor=COLOR_GRID,
+        zeroline=False,
+    )
+    fig.update_yaxes(
+        showgrid=True,
+        gridcolor=COLOR_GRID,
+        zeroline=False,
     )
     return fig
 
+
+def _latest_per_year(frame, metric):
+    """Latest valid quarterly observation in each year."""
+    result = _clean(frame, ["year", "quarter", metric])
+
+    if result.empty:
+        return result
+
+    result = result.sort_values(["year", "quarter"])
+    return result.drop_duplicates("year", keep="last")
+
+
+# ============================================================
+# 1. ANNUAL EMPLOYMENT AND UNEMPLOYMENT
+# ============================================================
 
 def create_time_series_chart(ts_data):
-    """Dual-axis line chart for employment and unemployment rates."""
     fig = go.Figure()
 
-    if ts_data.empty:
-        fig.add_annotation(text="ไม่มีข้อมูลสำหรับตัวกรองที่เลือก", showarrow=False, font=dict(size=14, color=COLOR_MUTED))
-        return apply_chart_theme(fig)
+    for metric, label, color, axis in [
+        ("emp_rate", "อัตราการมีงานทำ", COLOR_PINK, "y"),
+        ("unemp_rate", "อัตราการว่างงาน", COLOR_PURPLE, "y2"),
+    ]:
+        frame = _latest_per_year(ts_data, metric)
 
-    # Filter out empty rates
-    valid_ts = ts_data[ts_data['emp_rate'].notnull()].copy()
+        if frame.empty:
+            continue
 
-    # Employment Rate (Left Axis)
-    fig.add_trace(go.Scatter(
-        x=valid_ts['time_label'],
-        y=valid_ts['emp_rate'],
-        name='อัตราการมีงานทำ (%)',
-        mode='lines+markers',
-        line=dict(color=COLOR_PINK, width=3),
-        marker=dict(size=6, color=COLOR_PINK),
-        customdata=valid_ts['year'],
-        hovertemplate="<b>%{x}</b><br>อัตราการมีงานทำ: %{y:.2f}%<extra></extra>",
-        yaxis='y1'
-    ))
+        fig.add_trace(go.Scatter(
+            x=frame["year"].astype(int).astype(str),
+            y=frame[metric],
+            customdata=frame["year"].astype(int).tolist(),
+            mode="lines+markers",
+            name=label,
+            yaxis=axis,
+            line=dict(
+                color=color,
+                width=3,
+                dash="dot" if metric == "unemp_rate" else "solid",
+            ),
+            marker=dict(size=8, color=color),
+            hovertemplate=(
+                "<b>ปี พ.ศ. %{x}</b>"
+                "<br>" + label + ": %{y:.2f}%"
+                "<extra></extra>"
+            ),
+        ))
 
-    # Unemployment Rate (Right Axis)
-    unemp_ts = ts_data[ts_data['unemp_rate'].notnull()].copy()
-    fig.add_trace(go.Scatter(
-        x=unemp_ts['time_label'],
-        y=unemp_ts['unemp_rate'],
-        name='อัตราการว่างงาน (%)',
-        mode='lines+markers',
-        line=dict(color=COLOR_PURPLE, width=2.5, dash='dot'),
-        marker=dict(size=5, color=COLOR_PURPLE),
-        customdata=unemp_ts['year'],
-        hovertemplate="<b>%{x}</b><br>อัตราการว่างงาน: %{y:.2f}%<extra></extra>",
-        yaxis='y2'
-    ))
+    if not fig.data:
+        return None
 
-    fig = apply_chart_theme(fig, height=360)
+    fig = apply_chart_theme(
+        fig,
+        height=370,
+        margin=dict(l=60, r=60, t=75, b=55),
+    )
+
     fig.update_layout(
+        hovermode="x unified",
+        xaxis=dict(
+            type="category",
+            categoryorder="category ascending",
+            title="ปี พ.ศ.",
+            tickangle=0,
+        ),
         yaxis=dict(
-            title='อัตราการมีงานทำ (%)',
-            title_font=dict(color=COLOR_PINK),
+            title="อัตราการมีงานทำ (%)",
             tickfont=dict(color=COLOR_PINK),
-            side='left',
-            showgrid=True
         ),
         yaxis2=dict(
-            title='อัตราการว่างงาน (%)',
-            title_font=dict(color=COLOR_PURPLE),
+            title="อัตราการว่างงาน (%)",
+            overlaying="y",
+            side="right",
+            showgrid=False,
             tickfont=dict(color=COLOR_PURPLE),
-            side='right',
-            overlaying='y',
-            showgrid=False
         ),
-        clickmode='event+select'
     )
     return fig
 
+
+# ============================================================
+# 2. ANNUAL WAGE TREND
+# ============================================================
 
 def create_wage_trend_chart(ts_data, wage_data):
-    """Area/Line chart showing average wage evolution over time."""
-    fig = go.Figure()
+    frame = _clean(
+        wage_data,
+        ["year", "annual_avg_wage"],
+    )
 
-    if wage_data is not None and not wage_data.empty:
-        fig.add_trace(go.Scatter(
-            x=[f"พ.ศ. {int(y)}" for y in wage_data['year']],
-            y=wage_data['annual_avg_wage'],
-            name='ค่าจ้างเฉลี่ยรายปี (บาท/เดือน)',
-            mode='lines+markers',
-            line=dict(color=COLOR_PURPLE, width=3),
-            fill='tozeroy',
-            fillcolor='rgba(232, 60, 145, 0.12)',
-            marker=dict(size=7, color=COLOR_PINK),
-            customdata=wage_data['year'],
-            hovertemplate="<b>%{x}</b><br>ค่าจ้างเฉลี่ย: %{y:,.2f} บาท/เดือน<extra></extra>"
-        ))
+    if frame.empty:
+        return None
 
-    fig = apply_chart_theme(fig, height=360)
+    frame = frame.sort_values("year")
+
+    fig = go.Figure(go.Scatter(
+        x=frame["year"].astype(int).astype(str),
+        y=frame["annual_avg_wage"],
+        customdata=frame["year"].astype(int).tolist(),
+        mode="lines+markers",
+        name="ค่าจ้างเฉลี่ย",
+        line=dict(color=COLOR_PURPLE, width=3),
+        marker=dict(
+            color=COLOR_PINK,
+            size=9,
+            line=dict(color="white", width=1.5),
+        ),
+        fill="tozeroy",
+        fillcolor="rgba(232,60,145,0.10)",
+        hovertemplate=(
+            "<b>ปี พ.ศ. %{x}</b>"
+            "<br>ค่าจ้างเฉลี่ย: %{y:,.2f} บาท/เดือน"
+            "<extra></extra>"
+        ),
+    ))
+
+    fig = apply_chart_theme(fig, height=350)
     fig.update_layout(
-        yaxis=dict(title='ค่าจ้างเฉลี่ย (บาท/เดือน)', tickformat=","),
-        clickmode='event+select'
+        xaxis=dict(type="category", title="ปี พ.ศ."),
+        yaxis=dict(
+            title="ค่าจ้างเฉลี่ย (บาท/เดือน)",
+            tickformat=",",
+        ),
     )
     return fig
 
+
+# ============================================================
+# 3. ANNUAL EMPLOYED HEADCOUNT
+# ============================================================
 
 def create_headcount_trend_chart(ts_data):
-    """Bar chart of employed population headcount over time in millions of persons."""
-    fig = go.Figure()
+    frame = _latest_per_year(ts_data, "emp_headcount_m")
 
-    sub = ts_data[ts_data['emp_headcount_m'].notnull()].copy()
-    if not sub.empty:
-        fig.add_trace(go.Bar(
-            x=sub['time_label'],
-            y=sub['emp_headcount_m'],
-            name='ผู้มีงานทำ (ล้านคน)',
-            marker=dict(
-                color=COLOR_SKY_BLUE,
-                line=dict(color=COLOR_PURPLE, width=1)
-            ),
-            customdata=sub['year'],
-            hovertemplate="<b>%{x}</b><br>จำนวนผู้มีงานทำ: %{y:.2f} ล้านคน<extra></extra>"
-        ))
+    if frame.empty:
+        return None
 
-    fig = apply_chart_theme(fig, height=340)
+    fig = go.Figure(go.Bar(
+        x=frame["year"].astype(int).astype(str),
+        y=frame["emp_headcount_m"],
+        customdata=frame["year"].astype(int).tolist(),
+        marker=dict(
+            color=COLOR_PINK,
+            line=dict(color=COLOR_PURPLE, width=0.7),
+        ),
+        hovertemplate=(
+            "<b>ปี พ.ศ. %{x}</b>"
+            "<br>ผู้มีงานทำ: %{y:,.2f} ล้านคน"
+            "<extra></extra>"
+        ),
+    ))
+
+    fig = apply_chart_theme(fig, height=350)
     fig.update_layout(
-        yaxis=dict(title='ผู้มีงานทำ (ล้านคน)'),
-        clickmode='event+select'
+        bargap=0.25,
+        xaxis=dict(
+            type="category",
+            title="ปี พ.ศ.",
+            showgrid=False,
+        ),
+        yaxis=dict(title="ผู้มีงานทำ (ล้านคน)"),
     )
     return fig
 
+
+# ============================================================
+# 4. QUARTERLY UNEMPLOYMENT
+# ============================================================
 
 def create_seasonality_chart(df, filters):
-    """Bar chart comparing unemployment rates across quarters (Q1-Q4) to show seasonal shifts."""
-    region = filters.get('region', 'ทั้งหมด')
-    target_region = 'รวม' if region == 'ทั้งหมด' else region
+    year = int(filters.get("year", 2568))
 
-    mask = (
-        (df['clean_region'] == target_region) &
-        (df['clean_area'] == 'รวม') &
-        (df['clean_sex'] == 'รวม') &
-        (df['clean_age'] == 'รวม') &
-        (df['quarter'].isin([1, 2, 3, 4])) &
-        (df['unemp_rate'].notnull())
-    )
-    if target_region == 'กรุงเทพมหานคร':
-        mask = (
-            (df['clean_region'] == target_region) &
-            (df['clean_area'] == 'ในเขตเทศบาล') &
-            (df['clean_sex'] == 'รวม') &
-            (df['clean_age'] == 'รวม') &
-            (df['quarter'].isin([1, 2, 3, 4])) &
-            (df['unemp_rate'].notnull())
-        )
+    region = filters.get("region", "ทั้งหมด")
+    area = filters.get("area", "ทั้งหมด")
+    sex = filters.get("sex", "ทั้งหมด")
+    age = filters.get("age_group", "ทั้งหมด")
 
-    sub = df[mask]
-    q_avg = sub.groupby('quarter')['unemp_rate'].mean().reset_index()
+    target_region = "รวม" if region == "ทั้งหมด" else region
+    target_area = "รวม" if area == "ทั้งหมด" else area
+    target_sex = "รวม" if sex == "ทั้งหมด" else sex
+    target_age = "รวม" if age == "ทั้งหมด" else age
 
-    q_labels = {
-        1: 'Q1 (ม.ค.-มี.ค. / ฤดูแล้ง)',
-        2: 'Q2 (เม.ย.-มิ.ย.)',
-        3: 'Q3 (ก.ค.-ก.ย. / ฤดูเพาะปลูก)',
-        4: 'Q4 (ต.ค.-ธ.ค. / ฤดูเก็บเกี่ยว)'
-    }
-    q_avg['q_label'] = q_avg['quarter'].map(q_labels)
+    if target_region == "กรุงเทพมหานคร" and target_area == "รวม":
+        target_area = "ในเขตเทศบาล"
 
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=q_avg['q_label'],
-        y=q_avg['unemp_rate'],
-        marker=dict(
-            color=[COLOR_ORANGE, COLOR_PURPLE, COLOR_SKY_BLUE, COLOR_PINK],
-            line=dict(color=COLOR_DARK_PURPLE, width=1)
-        ),
-        customdata=q_avg['quarter'],
-        hovertemplate="<b>%{x}</b><br>อัตราว่างงานเฉลี่ย: %{y:.2f}%<extra></extra>"
-    ))
-
-    fig = apply_chart_theme(fig, height=340)
-    fig.update_layout(
-        yaxis=dict(title='อัตราการว่างงานเฉลี่ย (%)'),
-        clickmode='event+select'
-    )
-    return fig
-
-
-def create_regional_ranking_chart(reg_data, metric='avg_wage', selected_region=None):
-    """Horizontal sorted bar chart ranking regions by wage or unemployment."""
-    fig = go.Figure()
-
-    if reg_data.empty:
-        return apply_chart_theme(fig)
-
-    metric_col = metric
-    if metric == 'avg_wage':
-        title = 'ค่าจ้างเฉลี่ยรายภูมิภาค (บาท/เดือน)'
-        x_label = 'ค่าจ้างเฉลี่ย (บาท/เดือน)'
-        hover_unit = 'บาท/เดือน'
-        format_str = ":,.2f"
-        sorted_df = reg_data.sort_values(by=metric_col, ascending=True)
-    elif metric == 'unemp_rate':
-        title = 'อัตราการว่างงานรายภูมิภาค (%)'
-        x_label = 'อัตราการว่างงาน (%)'
-        hover_unit = '%'
-        format_str = ":.2f"
-        sorted_df = reg_data.sort_values(by=metric_col, ascending=True)
-    else:
-        title = 'อัตราการมีงานทำรายภูมิภาค (%)'
-        x_label = 'อัตราการมีงานทำ (%)'
-        hover_unit = '%'
-        format_str = ":.2f"
-        sorted_df = reg_data.sort_values(by=metric_col, ascending=True)
-
-    colors = []
-    for r in sorted_df['region']:
-        if selected_region and r == selected_region:
-            colors.append(COLOR_PINK)
-        else:
-            colors.append(COLOR_PURPLE)
-
-    fig.add_trace(go.Bar(
-        y=sorted_df['region'],
-        x=sorted_df[metric_col],
-        orientation='h',
-        marker=dict(color=colors, line=dict(color=COLOR_DARK_PURPLE, width=0.5)),
-        customdata=sorted_df['region'],
-        hovertemplate=f"<b>%{{y}}</b><br>{x_label}: %{{x{format_str}}} {hover_unit}<extra></extra>"
-    ))
-
-    fig = apply_chart_theme(fig, height=380, margin=dict(l=140, r=30, t=30, b=40))
-    fig.update_layout(
-        xaxis=dict(title=x_label),
-        clickmode='event+select'
-    )
-    return fig
-
-
-def create_wage_vs_employment_scatter(reg_data):
-    """Bubble scatter plot showing relation between wage and employment rate."""
-    fig = go.Figure()
-
-    if reg_data.empty or reg_data['avg_wage'].dropna().empty:
-        return apply_chart_theme(fig)
-
-    clean_df = reg_data.dropna(subset=['avg_wage', 'emp_rate']).copy()
-    if clean_df.empty:
-        return apply_chart_theme(fig)
-
-    sizes = clean_df['headcount_m'].fillna(1.0) * 8
-    sizes = np.clip(sizes, 12, 45)
-
-    fig.add_trace(go.Scatter(
-        x=clean_df['avg_wage'],
-        y=clean_df['emp_rate'],
-        mode='markers+text',
-        text=clean_df['region'],
-        textposition='top center',
-        textfont=dict(family=FONT_FAMILY, size=11, color=COLOR_DARK_PURPLE),
-        marker=dict(
-            size=sizes,
-            color=clean_df['avg_wage'],
-            colorscale=[[0, COLOR_PURPLE], [0.5, COLOR_PINK], [1, COLOR_ORANGE]],
-            showscale=False,
-            line=dict(color=COLOR_DARK_PURPLE, width=1.5)
-        ),
-        customdata=clean_df['region'],
-        hovertemplate=(
-            "<b>%{customdata}</b><br>" +
-            "ค่าจ้างเฉลี่ย: %{x:,.2f} บาท/เดือน<br>" +
-            "อัตรามีงานทำ: %{y:.2f}%<br>" +
-            "<extra></extra>"
-        )
-    ))
-
-    fig = apply_chart_theme(fig, height=380)
-    fig.update_layout(
-        xaxis=dict(title='ค่าจ้างเฉลี่ย (บาท/เดือน)', tickformat=","),
-        yaxis=dict(title='อัตราการมีงานทำ (%)'),
-        clickmode='event+select'
-    )
-    return fig
-
-
-def create_dumbbell_wage_chart(area_data):
-    """Dumbbell / paired comparison of municipal vs non-municipal wages."""
-    fig = go.Figure()
-
-    if area_data.empty or area_data['wage_in'].dropna().empty:
-        return apply_chart_theme(fig)
-
-    valid_df = area_data.dropna(subset=['wage_in', 'wage_out']).copy()
-
-    # Lines connecting the points
-    for _, row in valid_df.iterrows():
-        fig.add_trace(go.Scatter(
-            x=[row['wage_out'], row['wage_in']],
-            y=[row['region'], row['region']],
-            mode='lines',
-            line=dict(color=COLOR_MUTED, width=3),
-            showlegend=False,
-            hoverinfo='skip'
-        ))
-
-    # Points for Non-municipal
-    fig.add_trace(go.Scatter(
-        x=valid_df['wage_out'],
-        y=valid_df['region'],
-        mode='markers',
-        name='นอกเขตเทศบาล (ชนบท)',
-        marker=dict(color=COLOR_PURPLE, size=11, symbol='circle'),
-        customdata=valid_df['region'],
-        hovertemplate="<b>%{y}</b> (นอกเขต): %{x:,.2f} บาท/เดือน<extra></extra>"
-    ))
-
-    # Points for Municipal
-    fig.add_trace(go.Scatter(
-        x=valid_df['wage_in'],
-        y=valid_df['region'],
-        mode='markers',
-        name='ในเขตเทศบาล (เมือง)',
-        marker=dict(color=COLOR_PINK, size=11, symbol='diamond'),
-        customdata=valid_df['region'],
-        hovertemplate="<b>%{y}</b> (ในเขต): %{x:,.2f} บาท/เดือน<extra></extra>"
-    ))
-
-    fig = apply_chart_theme(fig, height=340, margin=dict(l=140, r=30, t=40, b=40))
-    fig.update_layout(
-        xaxis=dict(title='ค่าจ้างเฉลี่ย (บาท/เดือน)', tickformat=","),
-        clickmode='event+select'
-    )
-    return fig
-
-
-def create_gender_gap_chart(gender_data):
-    """Grouped bar chart for Male vs Female wages and gap percentage."""
-    fig = go.Figure()
-
-    if gender_data.empty or gender_data['avg_wage'].dropna().empty:
-        return apply_chart_theme(fig)
-
-    colors = {'ชาย': COLOR_SKY_BLUE, 'หญิง': COLOR_PINK}
-
-    fig.add_trace(go.Bar(
-        x=gender_data['sex'],
-        y=gender_data['avg_wage'],
-        marker=dict(
-            color=[colors.get(s, COLOR_PURPLE) for s in gender_data['sex']],
-            line=dict(color=COLOR_DARK_PURPLE, width=1)
-        ),
-        text=[f"{w:,.0f} ฿" if pd.notnull(w) else "" for w in gender_data['avg_wage']],
-        textposition='outside',
-        textfont=dict(family=FONT_FAMILY, size=12, color=COLOR_DARK_PURPLE),
-        customdata=gender_data['sex'],
-        hovertemplate="<b>เพศ%{x}</b><br>ค่าจ้างเฉลี่ย: %{y:,.2f} บาท/เดือน<extra></extra>"
-    ))
-
-    fig = apply_chart_theme(fig, height=340)
-    fig.update_layout(
-        yaxis=dict(title='ค่าจ้างเฉลี่ย (บาท/เดือน)', tickformat=","),
-        clickmode='event+select'
-    )
-    return fig
-
-
-def create_age_wage_chart(age_data):
-    """Age-Wage profile curve showing peak wage earning years."""
-    fig = go.Figure()
-
-    if age_data.empty:
-        return apply_chart_theme(fig)
-
-    fig.add_trace(go.Scatter(
-        x=age_data['age_group'],
-        y=age_data['avg_wage'],
-        mode='lines+markers',
-        line=dict(color=COLOR_PURPLE, width=3.5, shape='spline'),
-        marker=dict(size=9, color=COLOR_PINK),
-        fill='tozeroy',
-        fillcolor='rgba(232, 60, 145, 0.1)',
-        customdata=age_data['age_group'],
-        hovertemplate="<b>กลุ่มอายุ %{x}</b><br>ค่าจ้างเฉลี่ย: %{y:,.2f} บาท/เดือน<extra></extra>"
-    ))
-
-    fig = apply_chart_theme(fig, height=350)
-    fig.update_layout(
-        yaxis=dict(title='ค่าจ้างเฉลี่ย (บาท/เดือน)', tickformat=","),
-        xaxis=dict(tickangle=-30),
-        clickmode='event+select'
-    )
-    return fig
-
-
-def create_youth_unemployment_chart(age_data):
-    """Bar chart of unemployment rates by age group highlighting youth (15-24)."""
-    fig = go.Figure()
-
-    if age_data.empty:
-        return apply_chart_theme(fig)
-
-    colors = []
-    for ag in age_data['age_group']:
-        if ag in ['15-19 ปี', '20-24 ปี']:
-            colors.append(COLOR_PINK)  # Highlight youth unemployment
-        else:
-            colors.append(COLOR_MUTED)
-
-    fig.add_trace(go.Bar(
-        x=age_data['age_group'],
-        y=age_data['unemp_rate'],
-        marker=dict(color=colors, line=dict(color=COLOR_DARK_PURPLE, width=0.5)),
-        text=[f"{r:.1f}%" if pd.notnull(r) else "" for r in age_data['unemp_rate']],
-        textposition='outside',
-        textfont=dict(family=FONT_FAMILY, size=11, color=COLOR_DARK_PURPLE),
-        customdata=age_data['age_group'],
-        hovertemplate="<b>กลุ่มอายุ %{x}</b><br>อัตราการว่างงาน: %{y:.2f}%<extra></extra>"
-    ))
-
-    fig = apply_chart_theme(fig, height=350)
-    fig.update_layout(
-        yaxis=dict(title='อัตราการว่างงาน (%)'),
-        xaxis=dict(tickangle=-30),
-        clickmode='event+select'
-    )
-    return fig
-
-
-def create_demographic_matrix_heatmap(df, filters):
-    """Matrix heatmap of employed population across Sex and Age Groups."""
-    year = filters.get('year', 'ทั้งหมด')
-    quarter = filters.get('quarter', 'ทั้งหมด')
-    region = filters.get('region', 'ทั้งหมด')
-
-    cur_year = int(year) if year != 'ทั้งหมด' else 2568
-    cur_q = int(quarter) if (quarter != 'ทั้งหมด' and int(quarter) > 0) else None
-
-    target_region = 'รวม' if region == 'ทั้งหมด' else region
-
-    age_brackets = [
-        '15-19 ปี', '20-24 ปี', '25-29 ปี', '30-34 ปี',
-        '35-39 ปี', '40-49 ปี', '50-59 ปี', '60 ปีขึ้นไป'
+    frame = df[
+        (df["year"] == year)
+        & (df["clean_region"] == target_region)
+        & (df["clean_area"] == target_area)
+        & (df["clean_sex"] == target_sex)
+        & (df["clean_age"] == target_age)
+        & df["quarter"].isin([1, 2, 3, 4])
+        & df["unemp_rate"].notna()
     ]
 
-    matrix_data = []
-    for s in ['ชาย', 'หญิง']:
-        row_vals = []
-        for ag in age_brackets:
-            mask = (
-                (df['clean_sex'] == s) &
-                (df['clean_age'] == ag) &
-                (df['year'] == cur_year) &
-                (df['emp_headcount'].notnull())
-            )
-            if target_region != 'รวม':
-                mask = mask & (df['clean_region'] == target_region)
-            if cur_q:
-                mask = mask & (df['quarter'] == cur_q)
-            else:
-                sub = df[mask]
-                if not sub.empty:
-                    mask = mask & (df['quarter'] == sub['quarter'].max())
+    if frame.empty:
+        return None
 
-            hc_dedup = df[mask].drop_duplicates(subset=['year', 'quarter', 'clean_region', 'clean_sex', 'clean_age'])
-            val_k = hc_dedup['emp_headcount'].sum() if not hc_dedup.empty else 0
-            row_vals.append(round(val_k / 1000.0, 2))  # In millions
-        matrix_data.append(row_vals)
+    rows = []
+    for quarter, group in frame.groupby("quarter"):
+        values = pd.to_numeric(
+            group["unemp_rate"], errors="coerce"
+        ).dropna().unique()
 
-    fig = go.Figure(data=go.Heatmap(
-        z=matrix_data,
-        x=age_brackets,
-        y=['ชาย', 'หญิง'],
-        colorscale=[[0, '#FFFFFF'], [0.2, COLOR_SOFT_PINK], [0.6, COLOR_PINK], [1, COLOR_PURPLE]],
-        text=matrix_data,
-        texttemplate="%{text:.2f}M",
-        textfont=dict(family=FONT_FAMILY, size=11),
-        hovertemplate="<b>เพศ%{y} | อายุ %{x}</b><br>ผู้มีงานทำ: %{z:.2f} ล้านคน<extra></extra>"
+        if len(values) == 1:
+            rows.append({
+                "quarter": int(quarter),
+                "unemp_rate": float(values[0]),
+            })
+
+    if not rows:
+        return None
+
+    result = pd.DataFrame(rows).sort_values("quarter")
+
+    colors = {
+        1: "#F062A6",
+        2: "#D94691",
+        3: "#B54A9C",
+        4: "#783A91",
+    }
+
+    fig = go.Figure(go.Bar(
+        x=[f"Q{int(q)}" for q in result["quarter"]],
+        y=result["unemp_rate"],
+        customdata=result["quarter"].astype(int).tolist(),
+        marker_color=[colors[q] for q in result["quarter"]],
+        hovertemplate=(
+            "<b>%{x}</b>"
+            "<br>อัตราว่างงาน: %{y:.2f}%"
+            "<extra></extra>"
+        ),
     ))
 
-    fig = apply_chart_theme(fig, height=280)
+    fig = apply_chart_theme(fig, height=340)
     fig.update_layout(
-        xaxis=dict(tickangle=-25),
-        clickmode='event+select'
+        xaxis=dict(title="ไตรมาส"),
+        yaxis=dict(title="อัตราการว่างงาน (%)"),
     )
     return fig
 
 
-def create_thailand_map(reg_data, metric='avg_wage', year=2568, selected_region='ทั้งหมด'):
-    """Regional polygons from the project's province GeoJSON; one shape per region.
+# ============================================================
+# 5. REGIONAL RANKING
+# ============================================================
 
-    This uses true region-level features and stable feature ordering for click events.
-    """
-    from shapely.geometry import shape, mapping
-    from shapely.ops import unary_union
+def create_regional_ranking_chart(
+    reg_data,
+    metric="avg_wage",
+    selected_region=None,
+):
+    frame = _clean(reg_data, ["region", metric])
 
-    geojson_path = os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), 'assets', 'thailand_regions.geojson'
-    )
-    if not os.path.isfile(geojson_path):
-        return create_regional_ranking_chart(reg_data, metric=metric)
-
-    with open(geojson_path, encoding='utf-8') as file:
-        source = json.load(file)
-
-    region_property = 'region_7' if int(year) >= 2568 else 'region_5'
-    groups = {}
-    for feature in source.get('features', []):
-        name = feature.get('properties', {}).get(region_property)
-        geom = feature.get('geometry')
-        if name and geom:
-            groups.setdefault(name, []).append(shape(geom))
-
-    if not groups or reg_data.empty or metric not in reg_data.columns:
-        return create_regional_ranking_chart(reg_data, metric=metric)
-
-    merged_shapes = {name: unary_union(items) for name, items in groups.items()}
-    geojson = {
-        'type': 'FeatureCollection',
-        'features': [
-            {'type': 'Feature', 'properties': {'region': name},
-             'geometry': mapping(geometry)}
-            for name, geometry in merged_shapes.items()
-        ]
-    }
-    frame = reg_data[['region', metric]].copy()
-    frame[metric] = pd.to_numeric(frame[metric], errors='coerce')
-    frame = frame.dropna(subset=[metric])
-    frame = frame[frame['region'].isin(merged_shapes)].drop_duplicates('region')
     if frame.empty:
-        return go.Figure()
+        return None
 
-    titles = {
-        'avg_wage': 'ค่าจ้างเฉลี่ย (บาท/เดือน)',
-        'unemp_rate': 'อัตราการว่างงาน (%)',
-        'emp_rate': 'อัตราการมีงานทำ (%)',
-    }
-    metric_title = titles.get(metric, metric)
-    # Order and trace locations are aligned. Click handler can use pointNumber or location.
-    fig = go.Figure(go.Choropleth(
-        geojson=geojson,
-        locations=frame['region'].tolist(),
-        z=frame[metric].tolist(),
-        featureidkey='properties.region',
-        customdata=[[str(region)] for region in frame['region']],
-        colorscale=[[0, '#FDE6F1'], [.45, '#EB5DA7'], [1, '#683074']],
-        colorbar=dict(title=metric_title, thickness=13, len=.65,
-                      x=1.01, xpad=4, tickfont=dict(size=11)),
-        marker_line_color='#FFFFFF', marker_line_width=1.8,
-        hovertemplate='<b>%{location}</b><br>' + metric_title + ': %{z:,.2f}<extra></extra>',
-        showscale=True,
+    frame = frame.sort_values(metric, ascending=True)
+
+    colors = [
+        COLOR_PINK if r == selected_region else COLOR_PURPLE
+        for r in frame["region"]
+    ]
+
+    fig = go.Figure(go.Bar(
+        x=frame[metric],
+        y=frame["region"],
+        orientation="h",
+        customdata=frame["region"].astype(str).tolist(),
+        marker=dict(
+            color=colors,
+            line=dict(color="white", width=0.8),
+        ),
+        text=[f"{v:,.2f}" for v in frame[metric]],
+        textposition="outside",
+        cliponaxis=False,
+        hovertemplate=(
+            "<b>%{y}</b>"
+            "<br>" + METRIC_LABELS.get(metric, metric)
+            + ": %{x:,.2f}"
+            "<extra></extra>"
+        ),
     ))
-    # Projections/extent in degrees. Explicit geographic extents avoid postage-stamp maps.
-    if selected_region in merged_shapes:
-        minx, miny, maxx, maxy = merged_shapes[selected_region].bounds
-        padding = 0.12
-    else:
-        joined = unary_union(list(merged_shapes.values()))
-        minx, miny, maxx, maxy = joined.bounds
-        padding = 0.045
-    dx, dy = max(0.8, maxx-minx), max(0.8, maxy-miny)
-    fig.update_geos(
-        projection_type='mercator',
-        lonaxis_range=[minx-dx*padding, maxx+dx*padding],
-        lataxis_range=[miny-dy*padding, maxy+dy*padding],
-        bgcolor='rgba(0,0,0,0)', visible=False,
-        showcoastlines=False, showland=False,
-        domain=dict(x=[0, .91], y=[0, 1]),
+
+    fig = apply_chart_theme(
+        fig,
+        height=390,
+        margin=dict(l=155, r=65, t=40, b=55),
     )
     fig.update_layout(
-        height=650, margin=dict(l=0, r=0, t=0, b=0),
-        paper_bgcolor='rgba(0,0,0,0)',
-        font=dict(family=FONT_FAMILY, color=COLOR_DARK_PURPLE),
-        clickmode='event+select', dragmode=False,
-        uirevision=f'map_{year}_{selected_region}_{metric}',
+        xaxis=dict(
+            title=METRIC_LABELS.get(metric, metric),
+            tickformat=",",
+            rangemode="tozero",
+        ),
+        yaxis=dict(showgrid=False),
     )
+    return fig
+
+
+# ============================================================
+# 6. WAGE VS EMPLOYMENT SCATTER
+# ============================================================
+
+def create_wage_vs_employment_scatter(
+    reg_data,
+    selected_region=None,
+):
+    frame = _clean(
+        reg_data,
+        ["region", "avg_wage", "emp_rate"],
+    )
+
+    if frame.empty:
+        return None
+
+    fig = go.Figure()
+
+    for _, row in frame.iterrows():
+        region = str(row["region"])
+        headcount = row.get("headcount_m")
+
+        try:
+            size = (
+                float(np.clip(float(headcount) * 8, 13, 46))
+                if pd.notna(headcount)
+                else 18
+            )
+        except (ValueError, TypeError):
+            size = 18
+
+        selected = region == selected_region
+
+        fig.add_trace(go.Scatter(
+            x=[float(row["avg_wage"])],
+            y=[float(row["emp_rate"])],
+            mode="markers",
+            name=region,
+            customdata=[region],
+            marker=dict(
+                color=REGION_COLORS.get(region, COLOR_PURPLE),
+                size=size,
+                opacity=0.95,
+                line=dict(
+                    color="#442050" if selected else "white",
+                    width=3.5 if selected else 1.5,
+                ),
+            ),
+            hovertemplate=(
+                "<b>" + region + "</b>"
+                "<br>ค่าจ้างเฉลี่ย: %{x:,.2f} บาท/เดือน"
+                "<br>อัตราการมีงานทำ: %{y:.2f}%"
+                "<extra></extra>"
+            ),
+        ))
+
+    fig = apply_chart_theme(
+        fig,
+        height=440,
+        margin=dict(l=65, r=30, t=110, b=60),
+    )
+    fig.update_layout(
+        legend=dict(
+            title="ภูมิภาค",
+            orientation="h",
+            x=0,
+            xanchor="left",
+            y=1.04,
+            yanchor="bottom",
+            font=dict(size=11),
+        ),
+        xaxis=dict(
+            title="ค่าจ้างเฉลี่ย (บาท/เดือน)",
+            tickformat=",",
+        ),
+        yaxis=dict(title="อัตราการมีงานทำ (%)"),
+    )
+    return fig
+
+
+# ============================================================
+# 7. MUNICIPAL WAGES - GROUPED HORIZONTAL BARS
+# ============================================================
+
+def create_dumbbell_wage_chart(
+    area_data,
+    selected_region=None,
+):
+    """
+    Kept original function name for app.py compatibility.
+    Visualization is grouped bars, not a dumbbell.
+    """
+    frame = _clean(
+        area_data,
+        ["region", "wage_in", "wage_out"],
+    )
+
+    if frame.empty:
+        return None
+
+    frame = frame.sort_values("wage_in", ascending=True)
+    regions = frame["region"].astype(str).tolist()
+
+    fig = go.Figure()
+
+    for column, label, color in [
+        ("wage_out", "นอกเขตเทศบาล", "#713574"),
+        ("wage_in", "ในเขตเทศบาล", "#E83C91"),
+    ]:
+        fig.add_trace(go.Bar(
+            y=regions,
+            x=frame[column],
+            orientation="h",
+            name=label,
+            customdata=regions,
+            marker=dict(
+                color=color,
+                line=dict(color="white", width=0.8),
+            ),
+            hovertemplate=(
+                "<b>%{y}</b>"
+                "<br>" + label + ": %{x:,.2f} บาท/เดือน"
+                "<extra></extra>"
+            ),
+        ))
+
+    fig = apply_chart_theme(
+        fig,
+        height=435,
+        margin=dict(l=170, r=25, t=80, b=55),
+    )
+    fig.update_layout(
+        barmode="group",
+        bargap=0.28,
+        bargroupgap=0.08,
+        legend=dict(
+            orientation="h",
+            x=0,
+            xanchor="left",
+            y=1.07,
+            yanchor="bottom",
+        ),
+        xaxis=dict(
+            title="ค่าจ้างเฉลี่ย (บาท/เดือน)",
+            tickformat=",",
+            rangemode="tozero",
+        ),
+        yaxis=dict(showgrid=False),
+    )
+    return fig
+
+
+# ============================================================
+# 8. LEGACY GENDER WAGE CHART
+# ============================================================
+
+def create_gender_gap_chart(
+    gender_data,
+    selected_sex=None,
+):
+    frame = _clean(gender_data, ["sex", "avg_wage"])
+
+    if frame.empty:
+        return None
+
+    fig = go.Figure(go.Bar(
+        x=frame["sex"],
+        y=frame["avg_wage"],
+        customdata=frame["sex"].astype(str).tolist(),
+        marker_color=[
+            COLOR_BLUE if s == "ชาย" else COLOR_PINK
+            for s in frame["sex"]
+        ],
+        hovertemplate=(
+            "<b>เพศ%{x}</b>"
+            "<br>ค่าจ้างเฉลี่ย: %{y:,.2f} บาท/เดือน"
+            "<extra></extra>"
+        ),
+    ))
+
+    fig = apply_chart_theme(fig, height=340)
+    fig.update_yaxes(
+        title_text="ค่าจ้างเฉลี่ย (บาท/เดือน)",
+        tickformat=",",
+    )
+    return fig
+
+
+# ============================================================
+# 9. GENDER HEADCOUNT DONUT
+# ============================================================
+
+def create_gender_headcount_donut(df, filters):
+    year = int(filters.get("year", 2568))
+    quarter = filters.get("quarter", "ทั้งหมด")
+    region = filters.get("region", "ทั้งหมด")
+    age = filters.get("age_group", "ทั้งหมด")
+    sex = filters.get("sex", "ทั้งหมด")
+
+    frame = df[
+        (df["year"] == year)
+        & (df["quarter"] > 0)
+        & df["emp_headcount"].notna()
+        & df["clean_sex"].isin(["ชาย", "หญิง"])
+    ].copy()
+
+    if region == "ทั้งหมด":
+        regions = REGIONS_7 if year >= 2568 else REGIONS_5
+        frame = frame[frame["clean_region"].isin(regions)]
+    else:
+        frame = frame[frame["clean_region"] == region]
+
+    if age == "ทั้งหมด":
+        frame = frame[frame["clean_age"].isin(AGES)]
+    else:
+        frame = frame[frame["clean_age"] == age]
+
+    if sex != "ทั้งหมด":
+        frame = frame[frame["clean_sex"] == sex]
+
+    if quarter != "ทั้งหมด":
+        frame = frame[frame["quarter"] == int(quarter)]
+    elif not frame.empty:
+        frame = frame[
+            frame["quarter"] == frame["quarter"].max()
+        ]
+
+    if frame.empty:
+        return None
+
+    keys = [
+        "year", "quarter", "clean_region",
+        "clean_sex", "clean_age",
+    ]
+
+    conflicts = frame.groupby(
+        keys, dropna=False
+    )["emp_headcount"].nunique()
+
+    if (conflicts > 1).any():
+        return None
+
+    frame = frame.drop_duplicates(subset=keys)
+
+    counts = (
+        frame.groupby("clean_sex")["emp_headcount"]
+        .sum()
+        .reindex(["ชาย", "หญิง"])
+        .dropna()
+    )
+
+    counts = counts[counts > 0]
+
+    if counts.empty:
+        return None
+
+    total_million = counts.sum() / 1000.0
+
+    fig = go.Figure(go.Pie(
+        labels=counts.index.tolist(),
+        values=counts.values.tolist(),
+        hole=0.68,
+        sort=False,
+        marker=dict(
+            colors=[
+                COLOR_BLUE if s == "ชาย" else COLOR_PINK
+                for s in counts.index
+            ],
+            line=dict(color="white", width=2),
+        ),
+        textinfo="percent",
+        textposition="inside",
+        hovertemplate=(
+            "<b>%{label}</b>"
+            "<br>จำนวนผู้มีงานทำ: %{value:,.1f} พันคน"
+            "<br>สัดส่วน: %{percent}"
+            "<extra></extra>"
+        ),
+    ))
+
+    fig.add_annotation(
+        x=0.5,
+        y=0.46,
+        xref="paper",
+        yref="paper",
+        showarrow=False,
+        text=f"<b>{total_million:,.2f}</b><br>ล้านคน",
+        font=dict(
+            family=FONT,
+            color=COLOR_DARK,
+            size=20,
+        ),
+    )
+
+    fig = apply_chart_theme(
+        fig,
+        height=410,
+        margin=dict(l=20, r=20, t=80, b=10),
+    )
+    fig.update_layout(
+        legend=dict(
+            orientation="h",
+            x=0.5,
+            xanchor="center",
+            y=1.06,
+            yanchor="bottom",
+            title=None,
+        ),
+    )
+    fig.update_traces(
+        domain=dict(x=[0.08, 0.92], y=[0.03, 0.92]),
+        selector=dict(type="pie"),
+    )
+    return fig
+
+
+# ============================================================
+# 10. WAGE BY AGE
+# ============================================================
+
+def create_age_wage_chart(
+    age_data,
+    selected_age=None,
+):
+    frame = _clean(
+        age_data,
+        ["age_group", "avg_wage"],
+    )
+
+    if frame.empty:
+        return None
+
+    fig = go.Figure(go.Scatter(
+        x=frame["age_group"],
+        y=frame["avg_wage"],
+        customdata=frame["age_group"].astype(str).tolist(),
+        mode="lines+markers",
+        line=dict(color=COLOR_PURPLE, width=3),
+        marker=dict(
+            size=10,
+            color=[
+                COLOR_PURPLE if a == selected_age else COLOR_PINK
+                for a in frame["age_group"]
+            ],
+            line=dict(color="white", width=1.5),
+        ),
+        fill="tozeroy",
+        fillcolor="rgba(232,60,145,0.08)",
+        hovertemplate=(
+            "<b>กลุ่มอายุ %{x}</b>"
+            "<br>ค่าจ้างเฉลี่ย: %{y:,.2f} บาท/เดือน"
+            "<extra></extra>"
+        ),
+    ))
+
+    fig = apply_chart_theme(fig, height=350)
+    fig.update_xaxes(tickangle=-30)
+    fig.update_yaxes(
+        title_text="ค่าจ้างเฉลี่ย (บาท/เดือน)",
+        tickformat=",",
+    )
+    return fig
+
+
+# ============================================================
+# 11. AGE UNEMPLOYMENT INSIGHT + RANKED BARS
+# ============================================================
+
+def create_youth_unemployment_chart(
+    age_data,
+    selected_age=None,
+):
+    """
+    Ranked unemployment rates by age.
+
+    - Strong headline identifying the highest reported rate.
+    - Horizontal bars sorted high to low.
+    - Pink highlights youth (15-19 and 20-24).
+    - Plotly customdata retains age-group cross-filtering.
+
+    IMPORTANT:
+    These are unemployment rates, not counts of unemployed people.
+    """
+    frame = _clean(
+        age_data,
+        ["age_group", "unemp_rate"],
+    )
+
+    if frame.empty:
+        return None
+
+    frame["unemp_rate"] = pd.to_numeric(
+        frame["unemp_rate"], errors="coerce"
+    )
+    frame = frame.dropna(subset=["unemp_rate"])
+
+    if frame.empty:
+        return None
+
+    # Each age group should have one reported rate.
+    # Conflicting values are excluded, rather than averaged.
+    rows = []
+    for age, group in frame.groupby("age_group", sort=False):
+        values = group["unemp_rate"].dropna().unique()
+
+        if len(values) == 1:
+            rows.append({
+                "age_group": str(age),
+                "unemp_rate": float(values[0]),
+            })
+
+    if not rows:
+        return None
+
+    ranked = pd.DataFrame(rows).sort_values(
+        "unemp_rate",
+        ascending=False,
+    ).reset_index(drop=True)
+
+    top = ranked.iloc[0]
+    top_age = str(top["age_group"])
+    top_rate = float(top["unemp_rate"])
+
+    max_rate = max(float(ranked["unemp_rate"].max()), 0.1)
+
+    colors = []
+    borders = []
+    widths = []
+
+    for age in ranked["age_group"]:
+        if age == selected_age:
+            colors.append("#713574")
+            borders.append("#48234D")
+            widths.append(2)
+        elif age == "15-19 ปี":
+            colors.append("#E83C91")
+            borders.append("#E83C91")
+            widths.append(0)
+        elif age == "20-24 ปี":
+            colors.append("#F062A6")
+            borders.append("#F062A6")
+            widths.append(0)
+        else:
+            colors.append("#BA9ACB")
+            borders.append("#BA9ACB")
+            widths.append(0)
+
+    fig = go.Figure(go.Bar(
+        x=ranked["unemp_rate"],
+        y=ranked["age_group"],
+        orientation="h",
+        customdata=ranked["age_group"].tolist(),
+        marker=dict(
+            color=colors,
+            line=dict(
+                color=borders,
+                width=widths,
+            ),
+        ),
+        text=[
+            f"{value:.2f}%"
+            for value in ranked["unemp_rate"]
+        ],
+        textposition="outside",
+        textfont=dict(
+            family=FONT,
+            color=COLOR_DARK,
+            size=12,
+        ),
+        cliponaxis=False,
+        hovertemplate=(
+            "<b>อายุ %{y}</b>"
+            "<br>อัตราการว่างงาน: %{x:.2f}%"
+            "<extra></extra>"
+        ),
+    ))
+
+    fig = apply_chart_theme(
+        fig,
+        height=515,
+        margin=dict(
+            l=110,
+            r=65,
+            t=125,
+            b=55,
+        ),
+    )
+
+    fig.update_layout(
+        bargap=0.42,
+        showlegend=False,
+        xaxis=dict(
+            title="อัตราการว่างงาน (%)",
+            range=[0, max_rate * 1.22],
+            tickformat=".1f",
+            ticksuffix="%",
+            gridcolor="#F0E8EE",
+            zeroline=False,
+        ),
+        yaxis=dict(
+            title=None,
+            autorange="reversed",
+            showgrid=False,
+            categoryorder="array",
+            categoryarray=ranked["age_group"].tolist(),
+        ),
+    )
+
+    # Insight heading is a visualization annotation, not a statistic
+    # computed from a different dataset.
+    fig.add_annotation(
+        x=0,
+        y=1.29,
+        xref="paper",
+        yref="paper",
+        xanchor="left",
+        yanchor="top",
+        text=(
+            "<b>กลุ่มที่มีอัตราว่างงานสูงสุด</b>"
+            f"<br><span style='font-size:22px;color:#D52D86'>"
+            f"{top_age} · {top_rate:.2f}%</span>"
+        ),
+        showarrow=False,
+        align="left",
+        font=dict(
+            family=FONT,
+            size=13,
+            color=COLOR_DARK,
+        ),
+    )
+
+    fig.add_annotation(
+        x=0,
+        y=-0.24,
+        xref="paper",
+        yref="paper",
+        xanchor="left",
+        text=(
+            "สีชมพูเน้นกลุ่มอายุ 15–24 ปี · "
+            "คลิกแท่งเพื่อกรองอายุทั้ง Dashboard"
+        ),
+        showarrow=False,
+        align="left",
+        font=dict(
+            family=FONT,
+            size=11,
+            color=COLOR_MUTED,
+        ),
+    )
+
+    return fig
+
+
+# ============================================================
+# 12. EMPLOYED HEADCOUNT BY SEX AND AGE
+# ============================================================
+
+def create_demographic_matrix_heatmap(df, filters):
+    year = int(filters.get("year", 2568))
+    quarter = filters.get("quarter", "ทั้งหมด")
+    region = filters.get("region", "ทั้งหมด")
+    sex = filters.get("sex", "ทั้งหมด")
+    age = filters.get("age_group", "ทั้งหมด")
+
+    sexes = ["ชาย", "หญิง"] if sex == "ทั้งหมด" else [sex]
+    ages = AGES if age == "ทั้งหมด" else [age]
+
+    frame = df[
+        (df["year"] == year)
+        & (df["quarter"] > 0)
+        & df["emp_headcount"].notna()
+        & df["clean_sex"].isin(sexes)
+        & df["clean_age"].isin(ages)
+    ].copy()
+
+    if region == "ทั้งหมด":
+        regions = REGIONS_7 if year >= 2568 else REGIONS_5
+        frame = frame[frame["clean_region"].isin(regions)]
+    else:
+        frame = frame[frame["clean_region"] == region]
+
+    if quarter != "ทั้งหมด":
+        frame = frame[frame["quarter"] == int(quarter)]
+    elif not frame.empty:
+        frame = frame[
+            frame["quarter"] == frame["quarter"].max()
+        ]
+
+    if frame.empty:
+        return None
+
+    keys = [
+        "year", "quarter", "clean_region",
+        "clean_sex", "clean_age",
+    ]
+
+    conflicts = frame.groupby(
+        keys, dropna=False
+    )["emp_headcount"].nunique()
+
+    if (conflicts > 1).any():
+        return None
+
+    frame = frame.drop_duplicates(subset=keys)
+
+    grouped = (
+        frame.groupby(["clean_sex", "clean_age"])["emp_headcount"]
+        .sum()
+        .reset_index()
+    )
+
+    pivot = grouped.pivot(
+        index="clean_sex",
+        columns="clean_age",
+        values="emp_headcount",
+    ).reindex(index=sexes, columns=ages)
+
+    if pivot.notna().sum().sum() == 0:
+        return None
+
+    pivot = pivot / 1000.0
+
+    fig = go.Figure(go.Heatmap(
+        z=pivot.values,
+        x=ages,
+        y=sexes,
+        colorscale=[
+            [0.00, "#FFF0F7"],
+            [0.25, "#F49AC2"],
+            [0.55, "#D94691"],
+            [1.00, "#713574"],
+        ],
+        hoverongaps=False,
+        colorbar=dict(title="ล้านคน"),
+        hovertemplate=(
+            "<b>เพศ%{y} · อายุ %{x}</b>"
+            "<br>ผู้มีงานทำ: %{z:.2f} ล้านคน"
+            "<extra></extra>"
+        ),
+    ))
+
+    fig = apply_chart_theme(fig, height=300)
+    fig.update_xaxes(tickangle=-25)
+    fig.update_yaxes(showgrid=False)
+    return fig
+
+
+# ============================================================
+# 13. THAILAND REGIONAL MAP
+# ============================================================
+
+@lru_cache(maxsize=2)
+def _load_regional_geojson(year_group):
+    """Merge provincial polygons into actual regions."""
+    try:
+        from shapely.geometry import mapping, shape
+        from shapely.ops import unary_union
+    except ImportError:
+        return None
+
+    path = (
+        Path(__file__).resolve().parent.parent
+        / "assets"
+        / "thailand_regions.geojson"
+    )
+
+    if not path.is_file():
+        return None
+
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            source = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    field = "region_7" if year_group == 7 else "region_5"
+    groups = {}
+
+    for feature in source.get("features", []):
+        region = feature.get("properties", {}).get(field)
+        geometry = feature.get("geometry")
+
+        if not region or not geometry:
+            continue
+
+        try:
+            polygon = shape(geometry)
+        except (ValueError, TypeError):
+            continue
+
+        if polygon.is_empty:
+            continue
+
+        groups.setdefault(region, []).append(polygon)
+
+    if not groups:
+        return None
+
+    polygons = {
+        name: unary_union(geometries)
+        for name, geometries in groups.items()
+    }
+
+    geojson = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"region": name},
+                "geometry": mapping(geometry),
+            }
+            for name, geometry in polygons.items()
+        ],
+    }
+
+    return geojson, polygons
+
+
+def create_thailand_map(
+    reg_data,
+    metric="avg_wage",
+    year=2568,
+    selected_region="ทั้งหมด",
+    height=550,
+):
+    """
+    Fixed-height map. Only geographic extent changes
+    when a region is selected.
+
+    Note: Browser support for Plotly Choropleth point
+    selection must be tested in the actual Streamlit app.
+    """
+    from shapely.ops import unary_union
+
+    year = int(year)
+    group = 7 if year >= 2568 else 5
+
+    loaded = _load_regional_geojson(group)
+
+    if loaded is None:
+        return None
+
+    geojson, polygons = loaded
+
+    frame = _clean(reg_data, ["region", metric])
+
+    if frame.empty:
+        return None
+
+    frame[metric] = pd.to_numeric(
+        frame[metric], errors="coerce"
+    )
+    frame = frame.dropna(subset=[metric])
+    frame = frame[
+        frame["region"].isin(polygons)
+    ].drop_duplicates("region")
+
+    if frame.empty:
+        return None
+
+    label = METRIC_LABELS.get(metric, metric)
+    values = frame[metric].astype(float)
+
+    low = float(values.min())
+    high = float(values.max())
+
+    if low == high:
+        high = low + 1
+
+    fig = go.Figure(go.Choropleth(
+        geojson=geojson,
+        locations=frame["region"].tolist(),
+        z=values.tolist(),
+        customdata=[
+            [str(region)] for region in frame["region"]
+        ],
+        featureidkey="properties.region",
+        colorscale=MAP_COLORS,
+        zmin=low,
+        zmax=high,
+        marker=dict(
+            line=dict(color="white", width=2)
+        ),
+        colorbar=dict(
+            title=dict(text=label),
+            thickness=12,
+            len=0.65,
+            x=1.01,
+            xpad=4,
+        ),
+        hovertemplate=(
+            "<b>%{location}</b>"
+            "<br>" + label + ": %{z:,.2f}"
+            "<extra></extra>"
+        ),
+    ))
+
+    if selected_region in polygons:
+        target = polygons[selected_region]
+
+        if target.geom_type == "Polygon":
+            pieces = [target]
+        elif target.geom_type == "MultiPolygon":
+            pieces = list(target.geoms)
+        else:
+            pieces = []
+
+        for piece in pieces:
+            xs, ys = piece.exterior.xy
+
+            fig.add_trace(go.Scattergeo(
+                lon=list(xs),
+                lat=list(ys),
+                mode="lines",
+                line=dict(
+                    color="#55206C",
+                    width=3.5,
+                ),
+                hoverinfo="skip",
+                showlegend=False,
+            ))
+
+        bounds = target.bounds
+        padding = 0.13
+
+    else:
+        bounds = unary_union(list(polygons.values())).bounds
+        padding = 0.045
+
+    min_lon, min_lat, max_lon, max_lat = bounds
+    lon_span = max(max_lon - min_lon, 0.7)
+    lat_span = max(max_lat - min_lat, 0.7)
+
+    fig.update_geos(
+        projection_type="mercator",
+        lonaxis_range=[
+            min_lon - lon_span * padding,
+            max_lon + lon_span * padding,
+        ],
+        lataxis_range=[
+            min_lat - lat_span * padding,
+            max_lat + lat_span * padding,
+        ],
+        domain=dict(x=[0, 0.88], y=[0, 1]),
+        visible=False,
+        bgcolor="rgba(0,0,0,0)",
+        showcoastlines=False,
+        showland=False,
+        showcountries=False,
+    )
+
+    fig.update_layout(
+        height=int(height),
+        autosize=False,
+        margin=dict(l=0, r=0, t=0, b=0),
+        font=dict(family=FONT, color=COLOR_DARK),
+        paper_bgcolor="rgba(0,0,0,0)",
+        clickmode="event+select",
+        dragmode=False,
+        uirevision=f"map_{year}_{selected_region}_{metric}",
+    )
+
     return fig
