@@ -1,4 +1,3 @@
-
 """
 Statistical Calculation and Metric Engine
 Thailand Labor Market Analytics Dashboard
@@ -667,3 +666,143 @@ def get_area_wage_comparison_data(df, filters):
         rows,
         columns=["region", "wage_in", "wage_out", "wage_gap"],
     )
+
+
+# ============================================================
+# PERIOD SERIES FOR THE DRILL-DOWN CHARTS (wage / headcount)
+# ============================================================
+
+SCOPE_START_YEAR = 2561
+SCOPE_END_YEAR = 2568
+
+# ค่าจ้างปี 2561-2566 มีค่าแยกไตรมาส (quarter 1-4) จริง
+# ค่าจ้างปี 2567-2568 อยู่ใน quarter = 0 เท่านั้น (ไม่มีป้ายไตรมาส)
+QUARTERLY_WAGE_LAST_YEAR = 2566
+
+WAGE_SERIES_COLUMNS = [
+    "year", "quarter", "label", "avg_wage", "kind", "note",
+]
+HEADCOUNT_SERIES_COLUMNS = [
+    "year", "quarter", "label", "headcount_m", "kind", "note",
+]
+
+
+def _series_targets(filters):
+    return (
+        _target(filters, "region"),
+        _target(filters, "area"),
+        _target(filters, "sex"),
+        _target(filters, "age_group"),
+    )
+
+
+def _wage_base(df, filters):
+    """Rows of the selected wage group across all years (no year filter)."""
+    region, area, sex, age = _series_targets(filters)
+    area = _area_for_region(region, area)
+    return df[
+        (df["clean_region"] == region)
+        & (df["clean_area"] == area)
+        & (df["clean_sex"] == sex)
+        & (df["clean_age"] == age)
+    ]
+
+
+def get_wage_period_series(df, filters, drill_year=None):
+    """
+    Average wage series for the wage chart.
+
+    drill_year is None  -> one row per year 2561-2568
+        * 2561-2566: wage of the latest quarter that has a wage (same
+          convention as the KPI card)
+        * 2567-2568: wage reported only under quarter = 0 (kind
+          'unlabeled'); several unlabeled values per group are averaged
+          exactly like the KPI card and the caveat says so.
+
+    drill_year given    -> Q1-Q4 of that year
+        * 2561-2566: real quarterly values (a quarter without data is
+          returned with avg_wage = None, never filled in)
+        * 2567-2568: ONE row, quarter = 0, kind 'unlabeled'. The annual
+          value is never repeated as Q1-Q4.
+    """
+    base = _wage_base(df, filters)
+    rows = []
+
+    def _row(year, quarter, label, wage, kind, note=""):
+        rows.append({
+            "year": int(year),
+            "quarter": int(quarter),
+            "label": label,
+            "avg_wage": _round(wage),
+            "kind": kind,
+            "note": note,
+        })
+
+    if drill_year is None:
+        years = range(SCOPE_START_YEAR, SCOPE_END_YEAR + 1)
+        for year in years:
+            group = base[base["year"] == year]
+            wage, note = _wage_value(group, year, None)
+            if year > QUARTERLY_WAGE_LAST_YEAR:
+                _row(year, 0, str(year), wage, "unlabeled", note)
+            else:
+                _row(year, 4, str(year), wage, "quarterly", note)
+    else:
+        year = int(drill_year)
+        group = base[base["year"] == year]
+        if year > QUARTERLY_WAGE_LAST_YEAR:
+            wage, note = _wage_value(group, year, None)
+            _row(year, 0, "ทั้งปี (ไม่แยกไตรมาส)", wage, "unlabeled", note)
+        else:
+            for quarter in (1, 2, 3, 4):
+                wage, note = _wage_value(group, year, quarter)
+                _row(year, quarter, f"Q{quarter}", wage, "quarterly", note)
+
+    return pd.DataFrame(rows, columns=WAGE_SERIES_COLUMNS)
+
+
+def get_headcount_period_series(df, filters, drill_year=None):
+    """
+    Employed headcount series (million persons).
+
+    Source unit is THOUSAND persons. Only non-overlapping cells
+    (region x sex x age) are added, never the 'รวม' rows on top of them.
+    Headcount is a stock, so quarters are never summed: the yearly value
+    is the latest quarter that has headcount data in that year.
+    The area filter is not applicable (the source has no municipal split).
+    """
+    region = filters.get("region", ALL)
+    sex = filters.get("sex", ALL)
+    age = filters.get("age_group", ALL)
+    rows = []
+
+    def _row(year, quarter, label, value_k, kind):
+        rows.append({
+            "year": int(year),
+            "quarter": int(quarter),
+            "label": label,
+            "headcount_m": (
+                _round(value_k / 1000)
+                if value_k is not None else None
+            ),
+            "kind": kind,
+            "note": "",
+        })
+
+    if drill_year is None:
+        for year in range(SCOPE_START_YEAR, SCOPE_END_YEAR + 1):
+            frame = df[
+                (df["year"] == year)
+                & df["emp_headcount"].notna()
+                & (df["quarter"] > 0)
+            ]
+            used_q = int(frame["quarter"].max()) if not frame.empty else 0
+            value = _headcount_value(df, year, None, region, sex, age)
+            _row(year, used_q, str(year), value, "yearly_latest")
+    else:
+        year = int(drill_year)
+        for quarter in (1, 2, 3, 4):
+            value = _headcount_value(df, year, quarter, region, sex, age)
+            _row(year, quarter, f"Q{quarter}", value, "quarterly")
+
+    return pd.DataFrame(rows, columns=HEADCOUNT_SERIES_COLUMNS)

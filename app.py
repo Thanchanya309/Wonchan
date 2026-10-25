@@ -1,4 +1,3 @@
-
 """
 Thailand Labor Market Analytics Dashboard
 Global Cross-filtering Edition
@@ -15,6 +14,10 @@ Main features
 8. Regional comparison charts retain all regions for reselection.
 9. Uses actual data only; never averages percentage rates
    to fabricate missing observations.
+10. MapLibre GL JS regional map (custom component) with animated
+    camera; the clicked region returns to Python as a global filter.
+11. Wage / headcount charts drill from yearly to Q1-Q4 of one year.
+12. Active-filter bar with per-dimension clear and full reset.
 """
 
 import html
@@ -53,12 +56,16 @@ from src.metrics import (
     get_regional_comparison_data,
     get_demographics_age_data,
     get_area_wage_comparison_data,
+    get_wage_period_series,
+    get_headcount_period_series,
 )
+from src.map_component import render_region_map
 
 from src.charts import (
     create_wage_trend_chart,
     create_headcount_trend_chart,
-    create_seasonality_chart,
+    create_wage_period_chart,
+    create_headcount_period_chart,
     create_regional_ranking_chart,
     create_wage_vs_employment_scatter,
     create_dumbbell_wage_chart,
@@ -228,6 +235,18 @@ if "_pending_chart_filter" not in st.session_state:
 # ============================================================
 # SHARED FILTER ENGINE
 # ============================================================
+
+def chart_version():
+    """
+    One version number for every chart key.
+    It changes whenever ANY filter changes (sidebar, chart click, map
+    click, chip, reset) so no chart keeps a stale selection.
+    """
+    return (
+        st.session_state.get("crossfilter_version", 0)
+        + st.session_state.get("chart_nonce", 0)
+    )
+
 
 def _normalise_selected_value(dimension, value):
     """Convert Plotly-selected values to sidebar types."""
@@ -501,7 +520,7 @@ def render_interactive_chart(
 
         key = (
             f"cross_{chart_name}_"
-            f"{st.session_state['crossfilter_version']}"
+            f"{chart_version()}"
         )
 
         if dimension is None:
@@ -559,6 +578,183 @@ def render_kpi(
         """,
         unsafe_allow_html=True,
     )
+
+
+
+# ============================================================
+# MAP EVENT / ACTIVE FILTERS / DRILL-DOWN HELPERS
+# ============================================================
+
+def handle_map_event(event, valid_regions, current_filters):
+    """
+    Turn a click coming back from the MapLibre component into the
+    shared region filter. The component also returns its LAST event on
+    every later rerun, so each event (identified by seq) is processed
+    exactly once.
+    """
+    if not isinstance(event, dict):
+        return
+
+    try:
+        seq = int(event.get("seq", 0))
+    except (TypeError, ValueError):
+        return
+
+    if seq <= st.session_state.get("map_last_seq", 0):
+        return
+
+    st.session_state["map_last_seq"] = seq
+
+    kind = event.get("type")
+    region = event.get("region")
+
+    if kind == "select" and region in set(valid_regions):
+        value = region
+    elif kind == "clear":
+        value = ALL
+    else:
+        return
+
+    if str(current_filters.get("region")) != str(value):
+        st.session_state["_pending_chart_filter"] = {
+            "dimension": "region",
+            "value": value,
+            "drill_down": False,
+        }
+
+    # Rerun in both cases: applies the filter before the sidebar is
+    # built, and lets the map receive the new ack_seq.
+    st.rerun()
+
+
+FILTER_CHIPS = [
+    ("year", "📅 ปี {v}"),
+    ("quarter", "⏱️ ไตรมาส {v}"),
+    ("region", "📍 {v}"),
+    ("area", "🏙️ {v}"),
+    ("sex", "👤 {v}"),
+    ("age_group", "🎂 {v}"),
+]
+
+
+def render_active_filters(current_filters):
+    """Active-filter bar: one chip per active dimension + reset all."""
+    chips = []
+
+    for dimension, template in FILTER_CHIPS:
+        value = current_filters.get(dimension, ALL)
+
+        if dimension == "year":
+            chips.append((dimension, template.format(v=value), True))
+        elif value not in (ALL, None):
+            chips.append((dimension, template.format(v=value), False))
+
+    st.markdown(
+        '<div class="filter-banner">'
+        '🎯 ตัวกรองที่ใช้อยู่ (ใช้ร่วมกันทุกแท็บ) · '
+        'กดที่ตัวกรองเพื่อล้างทีละมิติ'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    columns = st.columns(len(chips) + 1)
+
+    for column, (dimension, label, is_year) in zip(columns, chips):
+        with column:
+            st.button(
+                ("↺ " if is_year else "✕ ") + label,
+                key=f"chip_{dimension}",
+                on_click=clear_filter,
+                args=(dimension,),
+                use_container_width=True,
+                help=(
+                    "รีเซ็ตปีเป็นค่าเริ่มต้น (2568)"
+                    if is_year else "ล้างตัวกรองนี้"
+                ),
+            )
+
+    with columns[-1]:
+        st.button(
+            "🔄 รีเซ็ตทั้งหมด",
+            key="chip_reset_all",
+            on_click=reset_dashboard_view,
+            use_container_width=True,
+        )
+
+
+def missing_quarters_note(series, value_column):
+    """Name the quarters that have no real value (never filled in)."""
+    if series is None or series.empty:
+        return ""
+
+    have = set(
+        series.loc[series[value_column].notna(), "quarter"]
+        .astype(int)
+        .tolist()
+    )
+    missing = [q for q in (1, 2, 3, 4) if q not in have]
+
+    if not missing or not have.intersection({1, 2, 3, 4}):
+        return ""
+
+    return (
+        "ไม่มีข้อมูลไตรมาส "
+        + ", ".join(f"Q{q}" for q in missing)
+        + " ในชุดข้อมูลภายใต้ตัวกรองนี้ (ไม่มีการนำค่าจากช่วงอื่นมาแทน)"
+    )
+
+
+def render_period_chart(
+    figure,
+    series,
+    value_column,
+    title,
+    description,
+    chart_name,
+    drill_year,
+):
+    """
+    Yearly chart (click a year -> year filter + drill to quarters)
+    or Q1-Q4 chart (click a quarter -> quarter filter).
+    """
+    drilled = drill_year is not None
+
+    if drilled:
+        valid = (
+            series.loc[
+                series[value_column].notna()
+                & series["quarter"].isin([1, 2, 3, 4]),
+                "quarter",
+            ].astype(int).tolist()
+            if not series.empty else []
+        )
+    else:
+        valid = (
+            series.loc[series[value_column].notna(), "year"]
+            .astype(int).tolist()
+            if not series.empty else []
+        )
+
+    render_interactive_chart(
+        figure,
+        title,
+        description,
+        f"{chart_name}_{'q' if drilled else 'y'}",
+        dimension="quarter" if drilled else "year",
+        valid_values=valid,
+        drill_down=not drilled,
+    )
+
+    if drilled:
+        st.button(
+            "↩️ กลับไปรายปี",
+            key=f"back_{chart_name}",
+            on_click=reset_trend_view,
+        )
+
+        note = missing_quarters_note(series, value_column)
+        if note:
+            st.caption("ℹ️ " + note)
 
 
 # ============================================================
@@ -1162,6 +1358,12 @@ filters = dict(get_current_filters())
 selected_year = int(filters["year"])
 selected_region = filters["region"]
 
+# While the trend is in quarterly mode it always shows the GLOBAL
+# year, so changing the year from the sidebar, a chip or a chart
+# keeps every drill-down chart consistent.
+if st.session_state.get("trend_drill_year") is not None:
+    st.session_state["trend_drill_year"] = selected_year
+
 region_selected = selected_region not in (
     ALL, None
 )
@@ -1331,6 +1533,13 @@ selected_region_data = (
 
 
 # ============================================================
+# ACTIVE FILTERS
+# ============================================================
+
+render_active_filters(filters)
+
+
+# ============================================================
 # TABS
 # ============================================================
 
@@ -1427,91 +1636,85 @@ with tab1:
         else []
     )
 
-    if region_selected:
-        st.markdown(
-            '<div class="filter-banner">'
-            '📍 กำลังดูข้อมูล: '
-            + html.escape(str(selected_region))
-            + ' · แผนที่และกราฟอื่นใช้ตัวกรองเดียวกัน'
-            '</div>',
-            unsafe_allow_html=True,
-        )
+    # Slots keep a FIXED position in the page, so the map iframe is
+    # never re-created when a region is selected / cleared.
+    map_banner_slot = st.container()
+    map_box = st.container(border=True)
 
-        st.button(
-            "↩️ กลับไปดูทั้งประเทศ",
-            key="map_reset_region",
-            on_click=clear_filter,
-            args=("region",),
-        )
-
-        map_col, detail_col = st.columns(
-            [1.1, 0.9],
-            gap="medium",
-        )
-
-    else:
-        map_col = st.container()
-        detail_col = None
-
-    with map_col:
-
-        with st.container(border=True):
+    with map_banner_slot:
+        if region_selected:
             st.markdown(
-                "**🗺️ แผนที่ประเทศไทย**"
-            )
-            st.caption(
-                "คลิกภูมิภาคเพื่อกรองข้อมูลทุกแท็บ"
-            )
-
-            map_fig = build_map(
-                map_frame,
-                map_metric,
-                selected_year,
-                selected_region,
+                '<div class="filter-banner">'
+                '📍 กำลังดูข้อมูล: '
+                + html.escape(str(selected_region))
+                + ' · แผนที่และกราฟอื่นใช้ตัวกรองเดียวกัน'
+                '</div>',
+                unsafe_allow_html=True,
             )
 
-            if map_fig is None:
-                st.info(
-                    "ไม่สามารถแสดงแผนที่ได้"
-                )
-            else:
-                map_key = (
-                    "global_map_"
-                    f"{st.session_state['crossfilter_version']}"
-                )
+    all_map_regions = (
+        all_region_data["region"].astype(str).tolist()
+        if not all_region_data.empty
+        else []
+    )
 
-                plot_chart(
-                    map_fig,
-                    key=map_key,
-                    on_select=(
-                        lambda k=map_key,
-                               v=map_regions:
-                        queue_chart_filter(
-                            k,
-                            "region",
-                            v,
-                        )
-                    ),
-                    selection_mode="points",
-                )
+    map_values = {
+        str(row["region"]): row[map_metric]
+        for _, row in map_frame.iterrows()
+    }
 
-    if detail_col is not None:
+    map_details = {
+        str(row["region"]): {
+            "avg_wage": row.get("avg_wage"),
+            "emp_rate": row.get("emp_rate"),
+            "unemp_rate": row.get("unemp_rate"),
+            "headcount_m": row.get("headcount_m"),
+        }
+        for _, row in all_region_data.iterrows()
+    }
 
-        with detail_col:
-            with st.container(border=True):
-                render_regional_detail(
-                    selected_region,
-                    all_region_data,
-                    period_label,
-                )
+    map_note_parts = []
+    if selected_year >= 2567:
+        map_note_parts.append(
+            f"ค่าจ้างปี {selected_year} ไม่แยกไตรมาส (quarter = 0)"
+        )
+    if filters.get("area", ALL) != ALL:
+        map_note_parts.append(
+            "จำนวนผู้มีงานทำไม่มีข้อมูลแยกเขตเทศบาล"
+        )
 
-                st.button(
-                    "✕ ปิดรายละเอียด",
-                    key="close_region_panel",
-                    use_container_width=True,
-                    on_click=clear_filter,
-                    args=("region",),
-                )
+    with map_box:
+        st.markdown("**🗺️ แผนที่ประเทศไทย**")
+        st.caption(
+            "คลิกภูมิภาคเพื่อซูมและกรองข้อมูลทุกแท็บ · "
+            "แผนที่ใช้ MapLibre GL JS"
+        )
+
+        map_event, map_ok = render_region_map(
+            year=selected_year,
+            values=map_values,
+            details=map_details,
+            metric_key=map_metric,
+            metric_label=LABELS[map_metric],
+            selected=(
+                selected_region
+                if region_selected
+                and selected_region in all_map_regions
+                else None
+            ),
+            ack_seq=st.session_state.get("map_last_seq", 0),
+            period_label=period_label,
+            note=" · ".join(map_note_parts),
+            height=MAP_FULL_HEIGHT,
+        )
+
+        if not map_ok:
+            st.warning(
+                "ไม่สามารถแสดงแผนที่ได้: อ่านไฟล์ขอบเขตภูมิภาคไม่ได้ "
+                "หรือยังไม่ได้ติดตั้ง shapely (pip install shapely)"
+            )
+
+    handle_map_event(map_event, all_map_regions, filters)
 
     # --------------------------------------------------------
     # YEARLY TREND / GLOBAL FILTER DRILL-DOWN
@@ -1565,7 +1768,7 @@ with tab1:
 
                 year_key = (
                     "global_year_trend_"
-                    f"{st.session_state['crossfilter_version']}_"
+                    f"{chart_version()}_"
                     f"{st.session_state['trend_view_version']}"
                 )
 
@@ -1627,53 +1830,105 @@ with tab1:
                 )
 
     # --------------------------------------------------------
-    # OTHER TREND CHARTS
+    # SECONDARY TREND CHARTS: AVERAGE WAGE + EMPLOYED HEADCOUNT
+    # (yearly 2561-2568  ->  Q1-Q4 of the clicked year)
     # --------------------------------------------------------
 
-    ts_data, wage_data = get_time_series_data(
-        df, filters
+    chart_year = st.session_state["trend_drill_year"]
+    drilled_now = chart_year is not None
+
+    selected_quarter = filters.get("quarter", ALL)
+    selected_quarter = (
+        int(selected_quarter)
+        if selected_quarter not in (ALL, None)
+        else None
     )
 
-    left, right = st.columns(2)
+    wage_series = get_wage_period_series(
+        df, filters, chart_year
+    )
+    headcount_series = get_headcount_period_series(
+        df, filters, chart_year
+    )
 
-    with left:
-        render_interactive_chart(
-            create_wage_trend_chart(
-                ts_data, wage_data
+    wage_col, headcount_col = st.columns(2)
+
+    with wage_col:
+        wage_figure = create_wage_period_chart(
+            wage_series,
+            selected_year=selected_year,
+            selected_quarter=selected_quarter,
+            drilled=drilled_now,
+        )
+
+        if not drilled_now:
+            wage_title = "💵 ค่าจ้างเฉลี่ยรายปี"
+            wage_caption = (
+                "ปี 2561–2566 ใช้ค่าจ้างของไตรมาสล่าสุดของปี · "
+                "คลิกปีเพื่อดู Q1–Q4"
+            )
+        elif chart_year <= 2566:
+            wage_title = f"💵 ค่าจ้างเฉลี่ยรายไตรมาส ปี {chart_year}"
+            wage_caption = "คลิกแท่งเพื่อเปลี่ยนตัวกรองไตรมาส"
+        else:
+            wage_title = f"💵 ค่าจ้างเฉลี่ย ปี {chart_year} (ไม่แยกไตรมาส)"
+            wage_caption = (
+                "ปีนี้ชุดข้อมูลมีค่าจ้างเฉพาะ quarter = 0 "
+                "จึงไม่มีค่า Q1–Q4"
+            )
+
+        render_period_chart(
+            wage_figure,
+            wage_series,
+            "avg_wage",
+            wage_title,
+            wage_caption,
+            "wage_period",
+            chart_year,
+        )
+
+        if (
+            (not drilled_now and not wage_series.empty
+             and (wage_series["kind"] == "unlabeled").any())
+            or (drilled_now and chart_year > 2566)
+        ):
+            st.caption(
+                "⚠️ ค่าจ้างปี 2567–2568 ไม่มีป้ายไตรมาส และมีหลายค่าต่อกลุ่ม "
+                "ระบบแสดงค่าเฉลี่ยของค่าที่รายงาน (จุดสีส้ม) "
+                "ระดับค่าจ้างอาจเทียบกับปี 2566 ตรง ๆ ไม่ได้"
+            )
+
+    with headcount_col:
+        headcount_figure = create_headcount_period_chart(
+            headcount_series,
+            selected_year=selected_year,
+            selected_quarter=selected_quarter,
+            drilled=drilled_now,
+        )
+
+        render_period_chart(
+            headcount_figure,
+            headcount_series,
+            "headcount_m",
+            (
+                "👥 จำนวนผู้มีงานทำรายปี"
+                if not drilled_now
+                else f"👥 จำนวนผู้มีงานทำรายไตรมาส ปี {chart_year}"
             ),
-            "💵 แนวโน้มค่าจ้างเฉลี่ยรายปี",
-            "ประวัติค่าจ้างปี 2561–2568 "
-            "ภายใต้ตัวกรองพื้นที่และกลุ่มแรงงาน",
-            "wage_trend",
+            (
+                "หน่วยล้านคน (ไตรมาสล่าสุดของปี) · คลิกปีเพื่อดู Q1–Q4"
+                if not drilled_now
+                else "หน่วยล้านคน · คลิกแท่งเพื่อเปลี่ยนตัวกรองไตรมาส"
+            ),
+            "headcount_period",
+            chart_year,
         )
 
-    with right:
-
-        quarter_fig = create_seasonality_chart(
-            df, filters
-        )
-
-        # Q1-Q4 is a selectable global dimension.
-        render_interactive_chart(
-            quarter_fig,
-            "🌾 อัตราการว่างงานแยกตามไตรมาส",
-            f"ปี พ.ศ. {selected_year} "
-            "· คลิกแท่งเพื่อเปลี่ยนตัวกรองไตรมาส",
-            "seasonality",
-            dimension="quarter",
-            valid_values=[
-                1, 2, 3, 4
-            ],
-        )
-
-    render_interactive_chart(
-        create_headcount_trend_chart(
-            ts_data
-        ),
-        "👥 จำนวนผู้มีงานทำตามปี",
-        "ข้อมูลย้อนหลังตามที่มีจริง",
-        "headcount_trend",
-    )
+        if filters.get("area", ALL) != ALL:
+            st.caption(
+                "ℹ️ จำนวนผู้มีงานทำไม่มีข้อมูลแยกเขตเทศบาล "
+                "ตัวกรองเขตการปกครองจึงไม่มีผลกับกราฟนี้"
+            )
 
 
 # ============================================================
@@ -1853,7 +2108,7 @@ with tab3:
             "คลิกช่วงอายุเพื่อเปลี่ยนตัวกรองทุกแท็บ",
             "age_wage",
             dimension="age_group",
-            valid_values=AGE_ORDER,
+            valid_values=[a for a in AGE_ORDER if a != "รวม"],
         )
 
     with right:
@@ -1903,7 +2158,7 @@ with tab3:
 
                 age_key = (
                     "global_age_unemployment_"
-                    f"{st.session_state['crossfilter_version']}"
+                    f"{chart_version()}"
                 )
 
                 plot_chart(
@@ -1914,7 +2169,7 @@ with tab3:
                         queue_chart_filter(
                             k,
                             "age_group",
-                            AGE_ORDER,
+                            [a for a in AGE_ORDER if a != "รวม"],
                         )
                     ),
                     selection_mode="points",
@@ -1942,6 +2197,11 @@ with st.expander(
         - ใช้ข้อมูลเฉพาะปี พ.ศ. 2561–2568
         - ไม่แก้ไขไฟล์ CSV ต้นฉบับ
         - การคลิกปีบนกราฟแนวโน้มอัปเดต Global Filter
+        - ค่าจ้างปี 2567–2568 อยู่ใน quarter = 0 (ไม่แยกไตรมาส)
+          และมีหลายค่าต่อกลุ่ม ระบบแสดงค่าเฉลี่ยของค่าที่รายงาน
+          พร้อมเครื่องหมายสีส้ม
+        - จำนวนผู้มีงานทำหน่วยพันคน แสดงเป็นล้านคน
+          และไม่มีข้อมูลแยกเขตเทศบาล
         - การเลือกภูมิภาคและช่วงอายุใช้ตัวกรองร่วมกัน
         - กราฟเปรียบเทียบภูมิภาคแสดงทุกภาค
           เพื่อให้คลิกสลับภาคได้

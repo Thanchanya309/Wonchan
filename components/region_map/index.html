@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- MapLibre GL JS pinned to an exact version (loaded from jsDelivr) -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Kanit:wght@400;500;700&display=swap">
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<style>
+  :root {
+    --pink: #E83C91; --purple: #843A7D; --dark: #43334C;
+    --plum: #552B65; --panel-w: 36%;
+  }
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden;
+    font-family: "Kanit", "Noto Sans Thai", sans-serif; color: var(--dark); }
+  #wrap { position: relative; width: 100%; height: 100vh; overflow: hidden; border-radius: 14px; }
+  #map { position: absolute; inset: 0; }
+  .maplibregl-canvas { outline: none; }
+
+  /* ---- detail panel (slides in over the right side; the map frame never resizes) ---- */
+  #panel { position: absolute; top: 12px; bottom: 12px; right: 12px; width: var(--panel-w);
+    min-width: 280px; box-sizing: border-box; padding: 16px; overflow-y: auto;
+    background: #FFF9FD; border: 1px solid #EED8E7; border-radius: 16px;
+    box-shadow: 0 8px 28px rgba(85, 43, 101, .16);
+    transform: translateX(115%); opacity: 0; pointer-events: none;
+    transition: transform .8s cubic-bezier(.65,0,.35,1), opacity .5s ease; }
+  #panel.open { transform: translateX(0); opacity: 1; pointer-events: auto; }
+  .rg-head { background: linear-gradient(110deg, #FCE4F2, #F0DFF4); border-radius: 12px;
+    padding: 14px; margin-bottom: 12px; color: var(--plum); }
+  .rg-name { font-size: 1.3rem; font-weight: 700; }
+  .rg-sub { font-size: .82rem; margin-top: 2px; }
+  .rg-metric { background: #fff; border: 1px solid #EED8E7; border-radius: 12px;
+    padding: 10px 14px; margin-bottom: 9px; }
+  .rg-label { color: #856985; font-size: .82rem; font-weight: 500; }
+  .rg-value { color: #713574; font-size: 1.45rem; font-weight: 700; margin-top: 2px; }
+  .rg-value small { font-size: .8rem; font-weight: 500; color: #856985; }
+  .rg-value.na { color: #A99BAA; }
+  .rg-note { color: #856985; font-size: .74rem; line-height: 1.35; margin: 6px 2px 10px; }
+  #back { width: 100%; padding: 10px; border-radius: 12px; border: 1px solid #E83C91;
+    background: #fff; color: #D52D86; font: inherit; font-weight: 500; cursor: pointer;
+    transition: background .2s, color .2s; }
+  #back:hover { background: #E83C91; color: #fff; }
+
+  /* ---- legend ---- */
+  #legend { position: absolute; left: 14px; bottom: 14px; width: 190px; transition: opacity .6s; }
+  #legend.hidden { opacity: 0; pointer-events: none; }
+  #legend .title { font-size: .74rem; color: #856985; margin-bottom: 3px; }
+  #legend .bar { height: 10px; border-radius: 5px;
+    background: linear-gradient(90deg, #D95A9A, #C54C9D, #AA429B, #873D92, #633078); }
+  #legend .ends { display: flex; justify-content: space-between; font-size: .72rem; color: #713574; margin-top: 2px; }
+
+  #hint { position: absolute; left: 14px; top: 12px; font-size: .78rem; color: #856985;
+    background: rgba(255,249,253,.85); padding: 3px 10px; border-radius: 10px; transition: opacity .5s; }
+  #hint.hidden { opacity: 0; }
+  #err { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    text-align: center; padding: 24px; color: #713574; background: #FFF9FD; }
+  .maplibregl-popup-content { font-family: "Kanit", sans-serif; font-size: .82rem; color: var(--dark);
+    border-radius: 10px; padding: 7px 11px; box-shadow: 0 4px 14px rgba(85,43,101,.25); }
+  @media (max-width: 640px) { #panel { width: 62%; min-width: 0; } }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="map"></div>
+  <div id="hint">คลิกภูมิภาคเพื่อซูมและกรองข้อมูลทั้ง Dashboard</div>
+  <div id="legend"><div class="title" id="legend-title"></div><div class="bar"></div>
+    <div class="ends"><span id="lg-min"></span><span id="lg-max"></span></div></div>
+  <div id="panel"></div>
+  <div id="err">ไม่สามารถโหลด MapLibre GL JS ได้<br>กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ตของเบราว์เซอร์</div>
+</div>
+
+<script>
+/* =====================================================================
+ * Thailand region map  -  MapLibre GL JS  -  Streamlit custom component
+ * (plain HTML: no npm build; speaks the Streamlit component protocol)
+ *
+ * Python -> JS (render args):
+ *   geo, geo_id, values{region:number|null}, metric_key, metric_label,
+ *   details{region:{avg_wage,emp_rate,unemp_rate,headcount_m}}, note,
+ *   selected|null, ack_seq, period_label, height
+ * JS -> Python (component value):
+ *   {type:'select', region, seq}  |  {type:'clear', seq}
+ * ===================================================================== */
+"use strict";
+
+const PINK = "#E83C91", FADE = "#EAE1EA", NODATA = "#F3EDF3", OUTLINE = "#55206C";
+const SCALE = [[0,"#D95A9A"],[.25,"#C54C9D"],[.5,"#AA429B"],[.75,"#873D92"],[1,"#633078"]];
+const CAMERA_MS = 900, COLOR_MS = 700;
+
+const S = {
+  map: null, ready: false, args: null, geoId: null,
+  regions: [], bounds: {}, countryBounds: null,
+  selected: null, localSeq: 0, lastSeq: 0,
+  colors: {}, tween: 0, valsKey: null, camKey: null, frameH: 0, popup: null,
+};
+
+/* ----------------------------- Streamlit plumbing ----------------------------- */
+function post(type, data) {
+  window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type: type }, data || {}), "*");
+}
+function setHeight(h) { if (h !== S.frameH) { S.frameH = h; post("streamlit:setFrameHeight", { height: h }); } }
+function emit(payload) { post("streamlit:setComponentValue", { value: payload, dataType: "json" }); }
+function nextSeq() { S.lastSeq = Math.max(Date.now(), S.lastSeq + 1); S.localSeq = S.lastSeq; return S.lastSeq; }
+
+/* ----------------------------- colour helpers ----------------------------- */
+const hex2rgb = h => [1,3,5].map(i => parseInt(h.slice(i, i + 2), 16));
+const rgb2hex = c => "#" + c.map(v => Math.round(v).toString(16).padStart(2, "0")).join("");
+const mix = (a, b, t) => { const x = hex2rgb(a), y = hex2rgb(b); return rgb2hex(x.map((v, i) => v + (y[i] - v) * t)); };
+function scaleColor(t) {
+  t = Math.min(1, Math.max(0, t));
+  for (let i = 1; i < SCALE.length; i++) {
+    if (t <= SCALE[i][0]) { const [p0, c0] = SCALE[i-1], [p1, c1] = SCALE[i]; return mix(c0, c1, (t - p0) / (p1 - p0)); }
+  }
+  return SCALE[SCALE.length - 1][1];
+}
+const ease = t => t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2;   // easeInOutCubic
+
+/* ----------------------------- geometry ----------------------------- */
+function geomBounds(geom) {
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  (function walk(c) {
+    if (typeof c[0] === "number") { x0 = Math.min(x0, c[0]); x1 = Math.max(x1, c[0]); y0 = Math.min(y0, c[1]); y1 = Math.max(y1, c[1]); }
+    else c.forEach(walk);
+  })(geom.coordinates);
+  return [[x0, y0], [x1, y1]];
+}
+function indexGeo(geo) {
+  S.regions = []; S.bounds = {};
+  let X0 = 1e9, Y0 = 1e9, X1 = -1e9, Y1 = -1e9;
+  geo.features.forEach(f => {
+    const r = f.properties.region, b = geomBounds(f.geometry);
+    S.regions.push(r); S.bounds[r] = b;
+    X0 = Math.min(X0, b[0][0]); Y0 = Math.min(Y0, b[0][1]); X1 = Math.max(X1, b[1][0]); Y1 = Math.max(Y1, b[1][1]);
+  });
+  S.countryBounds = [[X0, Y0], [X1, Y1]];
+}
+
+/* ----------------------------- formatting ----------------------------- */
+const isNum = v => typeof v === "number" && isFinite(v);
+const fmt = (v, d) => isNum(v) ? v.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }) : null;
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+
+/* ----------------------------- map construction ----------------------------- */
+function buildMap() {
+  S.map = new maplibregl.Map({
+    container: "map",
+    style: { version: 8, sources: {}, layers: [] },     // no basemap tiles: only our own GeoJSON
+    center: [101, 13.2], zoom: 4.6, attributionControl: false,
+    dragRotate: false, pitchWithRotate: false, renderWorldCopies: false,
+  });
+  const m = S.map;
+  ["scrollZoom","dragPan","doubleClickZoom","touchZoomRotate","keyboard","boxZoom","dragRotate","touchPitch"]
+    .forEach(h => { try { m[h].disable(); } catch (e) {} });
+
+  m.on("load", () => {
+    m.addSource("regions", { type: "geojson", data: S.args.geo, promoteId: "region" });
+    m.addLayer({ id: "fill", type: "fill", source: "regions",
+      paint: { "fill-color": ["coalesce", ["feature-state", "c"], FADE], "fill-antialias": true } });
+    m.addLayer({ id: "line", type: "line", source: "regions",
+      paint: { "line-color": "#FFFFFF", "line-width": 1.2 }, layout: { "line-join": "round" } });
+    m.addLayer({ id: "sel-line", type: "line", source: "regions", filter: ["==", ["get", "region"], ""],
+      paint: { "line-color": OUTLINE, "line-width": 3.2 }, layout: { "line-join": "round" } });
+
+    S.popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 8 });
+    m.on("mousemove", "fill", e => {
+      m.getCanvas().style.cursor = "pointer";
+      const r = e.features[0].properties.region, v = (S.args.values || {})[r];
+      S.popup.setLngLat(e.lngLat)
+        .setHTML("<b>" + esc(r) + "</b><br>" + esc(S.args.metric_label) + ": " + (isNum(v) ? fmt(v, 2) : "ไม่มีข้อมูล"))
+        .addTo(m);
+    });
+    m.on("mouseleave", "fill", () => { m.getCanvas().style.cursor = ""; S.popup.remove(); });
+    m.on("click", "fill", e => { if (e.features && e.features.length) selectRegion(e.features[0].properties.region); });
+
+    S.ready = true;
+    apply(true);
+  });
+}
+
+/* ----------------------------- user actions (optimistic) ----------------------------- */
+function selectRegion(r) {
+  if (r === S.selected) return;
+  S.selected = r;
+  const seq = nextSeq();
+  apply(false);
+  emit({ type: "select", region: r, seq: seq });
+}
+function clearSelection() {
+  if (S.selected === null) return;
+  S.selected = null;
+  const seq = nextSeq();
+  apply(false);
+  emit({ type: "clear", seq: seq });
+}
+
+/* ----------------------------- visual state ----------------------------- */
+function targetColors() {
+  const a = S.args, vals = a.values || {}, nums = S.regions.map(r => vals[r]).filter(isNum);
+  const lo = Math.min.apply(null, nums), hi = Math.max.apply(null, nums), span = hi > lo ? hi - lo : 1;
+  const t = {};
+  S.regions.forEach(r => {
+    if (S.selected) t[r] = r === S.selected ? PINK : FADE;
+    else t[r] = isNum(vals[r]) ? scaleColor((vals[r] - lo) / span) : NODATA;
+  });
+  return { colors: t, lo: lo, hi: hi, hasNums: nums.length > 0 };
+}
+
+function tweenColors(target, ms) {
+  const m = S.map, from = Object.assign({}, S.colors), t0 = performance.now(), id = ++S.tween;
+  const set = (r, c) => { S.colors[r] = c; m.setFeatureState({ source: "regions", id: r }, { c: c }); };
+  if (ms <= 0) { S.regions.forEach(r => set(r, target[r])); return; }
+  (function step(now) {
+    if (id !== S.tween) return;                       // superseded by a newer transition
+    const k = ease(Math.min(1, (now - t0) / ms));
+    S.regions.forEach(r => set(r, mix(from[r] || target[r], target[r], k)));
+    if (k < 1) requestAnimationFrame(step);
+  })(t0);
+}
+
+function panelWidthPx() {
+  const w = document.getElementById("wrap").clientWidth;
+  return Math.max(280, Math.round(w * 0.36)) + 12;
+}
+
+function moveCamera(instant) {
+  const m = S.map, key = S.geoId + "|" + (S.selected || "");
+  if (key === S.camKey && !instant) return;           // same target: never restart the animation
+  const first = S.camKey === null;
+  S.camKey = key;
+  const dur = (first || instant) ? 0 : CAMERA_MS;
+  if (S.selected && S.bounds[S.selected]) {
+    m.fitBounds(S.bounds[S.selected], {
+      padding: { top: 36, bottom: 36, left: 36, right: panelWidthPx() + 24 },
+      duration: dur, easing: ease, maxZoom: 9, essential: true });
+  } else {
+    m.fitBounds(S.countryBounds, {
+      padding: { top: 24, bottom: 24, left: 24, right: 24 },
+      duration: dur, easing: ease, essential: true });
+  }
+}
+
+function renderPanel() {
+  const a = S.args, panel = document.getElementById("panel");
+  if (!S.selected) { panel.classList.remove("open"); return; }       // keep content while sliding out
+  const d = (a.details || {})[S.selected] || {};
+  const rows = [
+    ["💵 ค่าจ้างเฉลี่ย", fmt(d.avg_wage, 0), " บาท/เดือน"],
+    ["📈 อัตราการมีงานทำ", fmt(d.emp_rate, 2), "%"],
+    ["⚠️ อัตราการว่างงาน", fmt(d.unemp_rate, 2), "%"],
+    ["👥 จำนวนผู้มีงานทำ", fmt(d.headcount_m, 2), " ล้านคน"],
+  ];
+  panel.innerHTML =
+    '<div class="rg-head"><div class="rg-name">📍 ' + esc(S.selected) + '</div><div class="rg-sub">' +
+    esc(a.period_label || "") + "</div></div>" +
+    rows.map(r => '<div class="rg-metric"><div class="rg-label">' + r[0] + '</div>' +
+      (r[1] === null ? '<div class="rg-value na">ไม่มีข้อมูล</div>'
+                     : '<div class="rg-value">' + r[1] + "<small>" + r[2] + "</small></div>") + "</div>").join("") +
+    (a.note ? '<div class="rg-note">' + esc(a.note) + "</div>" : "") +
+    '<button id="back" type="button">↩ กลับไปดูทั้งประเทศ</button>';
+  document.getElementById("back").addEventListener("click", clearSelection);
+  panel.classList.add("open");
+}
+
+function renderLegend(info) {
+  const lg = document.getElementById("legend");
+  document.getElementById("legend-title").textContent = S.args.metric_label || "";
+  document.getElementById("lg-min").textContent = info.hasNums ? fmt(info.lo, 2) : "";
+  document.getElementById("lg-max").textContent = info.hasNums ? fmt(info.hi, 2) : "";
+  lg.classList.toggle("hidden", !!S.selected || !info.hasNums);
+  document.getElementById("hint").classList.toggle("hidden", !!S.selected);
+}
+
+/* instant=true -> no animation (first paint / resize) */
+function apply(instant) {
+  if (!S.ready || !S.args) return;
+  const m = S.map, a = S.args;
+  if (S.geoId !== a.geo_id) {                         // 5-region <-> 7-region year group
+    const firstGeo = S.geoId === null;
+    S.geoId = a.geo_id; indexGeo(a.geo);
+    if (!firstGeo) { m.getSource("regions").setData(a.geo); S.colors = {}; S.camKey = null; }
+    instant = instant || firstGeo;
+  }
+  const info = targetColors();
+  const vk = JSON.stringify([a.values, S.selected, a.metric_key]);
+  if (vk !== S.valsKey) { S.valsKey = vk; tweenColors(info.colors, instant ? 0 : COLOR_MS); }
+  m.setFilter("sel-line", ["==", ["get", "region"], S.selected || ""]);
+  moveCamera(instant);
+  renderPanel();
+  renderLegend(info);
+}
+
+/* ----------------------------- render from Python ----------------------------- */
+function onRender(args) {
+  S.args = args;
+  setHeight(args.height || 620);
+  document.getElementById("wrap").style.height = (args.height || 620) + "px";
+  if (typeof maplibregl === "undefined") { document.getElementById("err").style.display = "flex"; return; }
+  // Python is authoritative only after it has processed my latest click (ack_seq >= localSeq)
+  if ((args.ack_seq || 0) >= S.localSeq) S.selected = args.selected || null;
+  if (!S.map) { buildMap(); return; }
+  apply(false);
+}
+
+window.addEventListener("message", ev => {
+  if (ev.data && ev.data.type === "streamlit:render") onRender(ev.data.args || {});
+});
+let rz = 0;
+window.addEventListener("resize", () => {
+  clearTimeout(rz);
+  rz = setTimeout(() => { if (S.map && S.ready) { S.map.resize(); S.camKey = null; moveCamera(true); } }, 120);
+});
+post("streamlit:componentReady", { apiVersion: 1 });
+</script>
+</body>
+</html>

@@ -1,4 +1,3 @@
-
 """
 Thailand Labor Market Dashboard - Plotly Charts
 
@@ -303,83 +302,6 @@ def create_headcount_trend_chart(ts_data):
             showgrid=False,
         ),
         yaxis=dict(title="ผู้มีงานทำ (ล้านคน)"),
-    )
-    return fig
-
-
-# ============================================================
-# 4. QUARTERLY UNEMPLOYMENT
-# ============================================================
-
-def create_seasonality_chart(df, filters):
-    year = int(filters.get("year", 2568))
-
-    region = filters.get("region", "ทั้งหมด")
-    area = filters.get("area", "ทั้งหมด")
-    sex = filters.get("sex", "ทั้งหมด")
-    age = filters.get("age_group", "ทั้งหมด")
-
-    target_region = "รวม" if region == "ทั้งหมด" else region
-    target_area = "รวม" if area == "ทั้งหมด" else area
-    target_sex = "รวม" if sex == "ทั้งหมด" else sex
-    target_age = "รวม" if age == "ทั้งหมด" else age
-
-    if target_region == "กรุงเทพมหานคร" and target_area == "รวม":
-        target_area = "ในเขตเทศบาล"
-
-    frame = df[
-        (df["year"] == year)
-        & (df["clean_region"] == target_region)
-        & (df["clean_area"] == target_area)
-        & (df["clean_sex"] == target_sex)
-        & (df["clean_age"] == target_age)
-        & df["quarter"].isin([1, 2, 3, 4])
-        & df["unemp_rate"].notna()
-    ]
-
-    if frame.empty:
-        return None
-
-    rows = []
-    for quarter, group in frame.groupby("quarter"):
-        values = pd.to_numeric(
-            group["unemp_rate"], errors="coerce"
-        ).dropna().unique()
-
-        if len(values) == 1:
-            rows.append({
-                "quarter": int(quarter),
-                "unemp_rate": float(values[0]),
-            })
-
-    if not rows:
-        return None
-
-    result = pd.DataFrame(rows).sort_values("quarter")
-
-    colors = {
-        1: "#F062A6",
-        2: "#D94691",
-        3: "#B54A9C",
-        4: "#783A91",
-    }
-
-    fig = go.Figure(go.Bar(
-        x=[f"Q{int(q)}" for q in result["quarter"]],
-        y=result["unemp_rate"],
-        customdata=result["quarter"].astype(int).tolist(),
-        marker_color=[colors[q] for q in result["quarter"]],
-        hovertemplate=(
-            "<b>%{x}</b>"
-            "<br>อัตราว่างงาน: %{y:.2f}%"
-            "<extra></extra>"
-        ),
-    ))
-
-    fig = apply_chart_theme(fig, height=340)
-    fig.update_layout(
-        xaxis=dict(title="ไตรมาส"),
-        yaxis=dict(title="อัตราการว่างงาน (%)"),
     )
     return fig
 
@@ -1303,4 +1225,195 @@ def create_thailand_map(
         uirevision=f"map_{year}_{selected_region}_{metric}",
     )
 
+    return fig
+
+
+# ============================================================
+# 14. DRILL-DOWN WAGE / HEADCOUNT (yearly -> Q1-Q4 of one year)
+# ============================================================
+
+def _period_x(frame):
+    return frame["label"].astype(str).tolist()
+
+
+def _period_custom(frame, quarterly):
+    """customdata used by the click handler: year when yearly, quarter when quarterly."""
+    column = "quarter" if quarterly else "year"
+    return frame[column].astype(int).tolist()
+
+
+def create_wage_period_chart(
+    series,
+    selected_year=None,
+    selected_quarter=None,
+    drilled=False,
+):
+    """
+    Average wage.
+      drilled = False : yearly line 2561-2568 (click a year -> year filter)
+      drilled = True  : Q1-Q4 of selected_year for 2561-2566 (click a quarter)
+                        or ONE 'whole year' bar for 2567-2568, which have no
+                        quarterly wage in the source (quarter = 0).
+    Years without a value are simply absent; nothing is filled in.
+    """
+    frame = _clean(series, ["label", "avg_wage"])
+
+    if frame.empty:
+        return None
+
+    frame = frame.reset_index(drop=True)
+
+    if not drilled:
+        fig = go.Figure()
+
+        solid = frame[frame["kind"] == "quarterly"]
+        loose = frame[frame["kind"] == "unlabeled"]
+
+        def _sizes(sub):
+            return [
+                15 if int(y) == selected_year else 9
+                for y in sub["year"]
+            ]
+
+        if not solid.empty:
+            fig.add_trace(go.Scatter(
+                x=_period_x(solid),
+                y=solid["avg_wage"],
+                customdata=_period_custom(solid, False),
+                mode="lines+markers",
+                name="ค่าจ้างรายไตรมาส (ใช้ไตรมาสล่าสุดของปี)",
+                line=dict(color=COLOR_PURPLE, width=3),
+                marker=dict(
+                    color=COLOR_PINK,
+                    size=_sizes(solid),
+                    line=dict(color="white", width=1.5),
+                ),
+                hovertemplate=(
+                    "<b>ปี พ.ศ. %{x}</b>"
+                    "<br>ค่าจ้างเฉลี่ย: %{y:,.0f} บาท/เดือน"
+                    "<extra></extra>"
+                ),
+            ))
+
+        if not loose.empty:
+            fig.add_trace(go.Scatter(
+                x=_period_x(loose),
+                y=loose["avg_wage"],
+                customdata=_period_custom(loose, False),
+                mode="lines+markers",
+                name="ค่าจ้างไม่ระบุไตรมาส (quarter = 0)",
+                line=dict(color=COLOR_ORANGE, width=3, dash="dot"),
+                marker=dict(
+                    color=COLOR_ORANGE,
+                    symbol="diamond",
+                    size=[s + 2 for s in _sizes(loose)],
+                    line=dict(color="white", width=1.5),
+                ),
+                hovertemplate=(
+                    "<b>ปี พ.ศ. %{x}</b>"
+                    "<br>ค่าจ้างเฉลี่ย: %{y:,.0f} บาท/เดือน"
+                    "<br><i>ไม่ระบุไตรมาส</i>"
+                    "<extra></extra>"
+                ),
+            ))
+
+        fig = apply_chart_theme(fig, height=350)
+        fig.update_layout(
+            xaxis=dict(type="category", title="ปี พ.ศ."),
+            yaxis=dict(
+                title="ค่าจ้างเฉลี่ย (บาท/เดือน)",
+                tickformat=",",
+            ),
+        )
+        return fig
+
+    # ---------------- drilled: quarters of one year ----------------
+    unlabeled = (frame["kind"] == "unlabeled").all()
+    colors = []
+    for _, row in frame.iterrows():
+        if unlabeled:
+            colors.append(COLOR_ORANGE)
+        elif selected_quarter is not None and int(row["quarter"]) == selected_quarter:
+            colors.append(COLOR_PURPLE)
+        else:
+            colors.append(COLOR_PINK)
+
+    fig = go.Figure(go.Bar(
+        x=_period_x(frame),
+        y=frame["avg_wage"],
+        customdata=_period_custom(frame, True),
+        marker=dict(color=colors, line=dict(color=COLOR_PURPLE, width=0.7)),
+        text=[f"{v:,.0f}" for v in frame["avg_wage"]],
+        textposition="outside",
+        hovertemplate=(
+            "<b>%{x}</b>"
+            "<br>ค่าจ้างเฉลี่ย: %{y:,.0f} บาท/เดือน"
+            "<extra></extra>"
+        ),
+    ))
+
+    fig = apply_chart_theme(fig, height=350)
+    fig.update_layout(
+        bargap=0.35,
+        xaxis=dict(type="category", title="ไตรมาส" if not unlabeled else ""),
+        yaxis=dict(
+            title="ค่าจ้างเฉลี่ย (บาท/เดือน)",
+            tickformat=",",
+            rangemode="tozero",
+        ),
+    )
+    return fig
+
+
+def create_headcount_period_chart(
+    series,
+    selected_year=None,
+    selected_quarter=None,
+    drilled=False,
+):
+    """
+    Employed headcount in MILLION persons (source unit: thousand persons).
+      drilled = False : one bar per year (latest quarter of the year)
+      drilled = True  : Q1-Q4 of selected_year (click a quarter)
+    """
+    frame = _clean(series, ["label", "headcount_m"])
+
+    if frame.empty:
+        return None
+
+    colors = []
+    for _, row in frame.iterrows():
+        if drilled:
+            hit = (
+                selected_quarter is not None
+                and int(row["quarter"]) == selected_quarter
+            )
+        else:
+            hit = int(row["year"]) == selected_year
+        colors.append(COLOR_PURPLE if hit else COLOR_PINK)
+
+    fig = go.Figure(go.Bar(
+        x=_period_x(frame),
+        y=frame["headcount_m"],
+        customdata=_period_custom(frame, drilled),
+        marker=dict(color=colors, line=dict(color=COLOR_PURPLE, width=0.7)),
+        text=[f"{v:,.2f}" for v in frame["headcount_m"]],
+        textposition="outside",
+        hovertemplate=(
+            "<b>%{x}</b>"
+            "<br>ผู้มีงานทำ: %{y:,.2f} ล้านคน"
+            "<extra></extra>"
+        ),
+    ))
+
+    fig = apply_chart_theme(fig, height=350)
+    fig.update_layout(
+        bargap=0.3,
+        xaxis=dict(
+            type="category",
+            title="ไตรมาส" if drilled else "ปี พ.ศ.",
+            showgrid=False,
+        ),
+        yaxis=dict(title="ผู้มีงานทำ (ล้านคน)", rangemode="tozero"),
+    )
     return fig
