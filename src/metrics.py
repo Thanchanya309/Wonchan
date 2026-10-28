@@ -806,3 +806,74 @@ def get_headcount_period_series(df, filters, drill_year=None):
             _row(year, quarter, f"Q{quarter}", value, "quarterly")
 
     return pd.DataFrame(rows, columns=HEADCOUNT_SERIES_COLUMNS)
+
+# ===== ALL-YEAR FILTER SUPPORT =====
+# Per-year snapshots are averaged; rates are never summed, and headcount
+# is never added across years (which would count the same worker repeatedly).
+_get_kpis_single_year = get_kpis
+_get_regional_comparison_single_year = get_regional_comparison_data
+_get_demographics_gender_single_year = get_demographics_gender_data
+_get_demographics_age_single_year = get_demographics_age_data
+_get_area_wage_single_year = get_area_wage_comparison_data
+
+
+def _is_all_years(filters):
+    return filters.get("year", ALL) == ALL
+
+
+def _annual_years(df):
+    return sorted(pd.to_numeric(df["year"], errors="coerce").dropna().astype(int).unique())
+
+
+def _mean_nonmissing(items):
+    vals = pd.to_numeric(pd.Series(list(items), dtype="object"), errors="coerce").dropna()
+    return float(vals.mean()) if not vals.empty else None
+
+
+def _all_years_table(df, filters, calculate, key):
+    if not _is_all_years(filters):
+        return calculate(df, filters)
+    tables = []
+    for yr in _annual_years(df):
+        one = calculate(df, dict(filters, year=yr))
+        if isinstance(one, pd.DataFrame) and not one.empty:
+            one = one.copy()
+            one["_year_ref"] = yr
+            tables.append(one)
+    if not tables:
+        return calculate(df, dict(filters, year=int(df["year"].max()))).iloc[0:0]
+    together = pd.concat(tables, ignore_index=True)
+    numeric = [c for c in together.columns if c not in (key, "_year_ref")]
+    return together.groupby(key, as_index=False, sort=False)[numeric].mean(numeric_only=True).round(2)
+
+
+def get_kpis(df, filters):
+    if not _is_all_years(filters):
+        return _get_kpis_single_year(df, filters)
+    annual = [_get_kpis_single_year(df, dict(filters, year=yr)) for yr in _annual_years(df)]
+    if not annual:
+        return {"period_label": "ทุกปี (2561–2568)"}
+    output = dict(annual[-1])
+    for key in ("avg_wage", "emp_rate", "unemp_rate", "emp_headcount_k", "emp_headcount_m"):
+        value = _mean_nonmissing(row.get(key) for row in annual)
+        output[key] = _round(value, 1 if key == "emp_headcount_k" else 2)
+    output["wage_caveat"] = " | ".join(sorted(set(row.get("wage_caveat", "") for row in annual if row.get("wage_caveat"))))
+    output["headcount_caveat"] = annual[-1].get("headcount_caveat", "")
+    output["period_label"] = "ทุกปี (2561–2568)"
+    return output
+
+
+def get_regional_comparison_data(df, filters):
+    return _all_years_table(df, filters, _get_regional_comparison_single_year, "region")
+
+
+def get_demographics_gender_data(df, filters):
+    return _all_years_table(df, filters, _get_demographics_gender_single_year, "sex")
+
+
+def get_demographics_age_data(df, filters):
+    return _all_years_table(df, filters, _get_demographics_age_single_year, "age_group")
+
+
+def get_area_wage_comparison_data(df, filters):
+    return _all_years_table(df, filters, _get_area_wage_single_year, "region")

@@ -20,7 +20,7 @@ from src.data_loader import REGION_ORDER
 ALL = 'ทั้งหมด'
 
 DEFAULT_FILTERS = {
-    'year': 2568,
+    'year': ALL,
     'quarter': ALL,
     'region': ALL,
     'area': ALL,
@@ -148,7 +148,7 @@ def on_sidebar_change(dimension):
 # -------------------------------------------------------------
 def get_regions_for_year(df, year):
     """ภูมิภาคที่มีข้อมูลจริงในปีนั้น (5 ภาคถึงปี 2567, 7 ภาคตั้งแต่ปี 2568) เรียงตาม REGION_ORDER."""
-    sub = df[df['year'] == int(year)]
+    sub = df if year == ALL else df[df['year'] == int(year)]
     sub = sub[~sub['clean_region'].isin(['รวม', 'ไม่ระบุ'])]
     sub = sub[sub[_METRIC_COLUMNS].notna().any(axis=1)]
     found = set(sub['clean_region'].unique().tolist())
@@ -159,7 +159,7 @@ def get_regions_for_year(df, year):
 
 def get_quarters_for_year(df, year):
     """ไตรมาส 1-4 ที่มีข้อมูลจริงในปีนั้น (เช่น ปี 2569 มีเฉพาะไตรมาส 1)."""
-    sub = df[(df['year'] == int(year)) & (df['quarter'] > 0)]
+    sub = df[df['quarter'] > 0] if year == ALL else df[(df['year'] == int(year)) & (df['quarter'] > 0)]
     sub = sub[sub[_METRIC_COLUMNS].notna().any(axis=1)]
     return sorted(int(q) for q in sub['quarter'].unique())
 
@@ -173,13 +173,17 @@ def sanitize_filters(df):
     current = st.session_state.filters
     changed = False
 
-    years = sorted(int(y) for y in df['year'].unique())
-    try:
-        year = int(current.get('year'))
-    except (TypeError, ValueError):
-        year = None
-    if year not in years:
-        year = DEFAULT_FILTERS['year'] if DEFAULT_FILTERS['year'] in years else years[-1]
+    years = sorted(int(y) for y in df['year'].dropna().unique())
+    raw_year = current.get('year', ALL)
+    if raw_year == ALL:
+        year = ALL
+    else:
+        try:
+            year = int(raw_year)
+        except (TypeError, ValueError):
+            year = ALL
+        if year not in years:
+            year = ALL
     if current.get('year') != year:
         current['year'] = year
         changed = True
